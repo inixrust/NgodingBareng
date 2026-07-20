@@ -1,0 +1,38 @@
+[mysqld]
+# --- Karakter & kolasi ------------------------------------------------------
+character-set-server = utf8mb4
+collation-server     = utf8mb4_unicode_ci
+# Catatan: skip-character-set-client-handshake sudah dihapus di MySQL 8.4.
+# Laravel selalu mengirim `SET NAMES utf8mb4` sendiri, jadi tidak dibutuhkan.
+
+# --- Keamanan ---------------------------------------------------------------
+# caching_sha2_password sudah menjadi default di MySQL 8.4; opsi lama
+# --default-authentication-plugin dihapus di versi ini, gunakan authentication_policy.
+authentication_policy = caching_sha2_password
+skip-name-resolve
+local-infile = 0
+
+# --- InnoDB -----------------------------------------------------------------
+# Idealnya ~70% dari RAM yang dialokasikan ke container MySQL.
+# Nilai di bawah cocok untuk limit 1G (lihat compose.yaml).
+innodb_buffer_pool_size        = 512M
+innodb_redo_log_capacity       = 256M
+innodb_flush_method            = O_DIRECT
+# 1 = ACID penuh. Ubah ke 2 hanya bila boleh kehilangan ~1 detik transaksi terakhir.
+innodb_flush_log_at_trx_commit = 1
+innodb_file_per_table          = 1
+
+# --- Koneksi ----------------------------------------------------------------
+max_connections     = 100
+max_allowed_packet  = 64M
+wait_timeout        = 600
+interactive_timeout = 600
+
+# --- Log --------------------------------------------------------------------
+# Image resmi MySQL sudah mengarahkan error log ke stderr, jadi jangan set
+# log_error di sini — nilai kosong / /dev/stderr justru membuat mysqld gagal start.
+slow_query_log  = 1
+long_query_time = 2
+
+[client]
+default-character-set = utf8mb4

@@ -1,0 +1,89 @@
+# =============================================================================
+# L4.2 — SOLUSI
+#
+# readOnlyRootFilesystem tetap true. Yang ditambahkan hanya TIGA direktori yang
+# memang harus writable — tidak lebih.
+#
+#     kubectl apply -f lab/solution/L4.2-readonly-rootfs/deployment.yaml
+#     kubectl rollout status deployment/latihan-ro -n laravel
+#     kubectl delete -f lab/solution/L4.2-readonly-rootfs/deployment.yaml
+# =============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: latihan-ro
+  namespace: laravel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: latihan-ro
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: latihan-ro
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 82
+        runAsGroup: 82
+        fsGroup: 82
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: php-fpm
+          image: laravel-app:latest
+          imagePullPolicy: Never
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true      # TETAP true
+            capabilities:
+              drop: ["ALL"]
+          # Lab ini SENGAJA tidak memakai envFrom ke ConfigMap/Secret proyek.
+          # Nama keduanya dibangkitkan Kustomize dengan imbuhan hash, sehingga
+          # rujukan bernama polos akan gagal dengan CreateContainerConfigError —
+          # error yang tidak ada hubungannya dengan pelajaran lab ini dan justru
+          # menyesatkan. Nilai di bawah cukup untuk membuat entrypoint berjalan.
+          env:
+            - name: APP_ENV
+              value: production
+            - name: APP_KEY
+              value: base64:bGFiLXJlYWRvbmx5LXJvb3Rmcy1kdW1teS1rZXktMzJi
+            - name: LOG_CHANNEL
+              value: stderr
+            - name: WAIT_FOR_DB
+              value: "false"
+            # [4] Tanpa ini, `php artisan tinker` gagal dengan
+            #     "Writing to directory /home/www-data/.config/psysh is not
+            #      allowed". Home bawaan www-data ada di rootfs yang read-only.
+            #     /tmp sudah tersedia sebagai emptyDir writable, jadi cukup
+            #     arahkan HOME ke sana — tanpa melonggarkan apa pun.
+            - name: HOME
+              value: /tmp
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            # [3] HARUS bertahan: berisi berkas unggahan pengguna, log, dan
+            #     sesi. Memakai PVC yang sama dengan aplikasi utama.
+            - name: storage
+              mountPath: /var/www/html/storage
+            # [3] Cukup emptyDir: isinya cache config/route/view yang dibangun
+            #     ulang oleh entrypoint setiap container start. Memakai PVC di
+            #     sini hanya menambah ketergantungan tanpa manfaat.
+            - name: bootstrap-cache
+              mountPath: /var/www/html/bootstrap/cache
+            # [3] Cukup emptyDir: berkas sementara PHP dan perkakas.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: app-storage
+        - name: bootstrap-cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

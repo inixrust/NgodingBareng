@@ -1,0 +1,45 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: laravel
+
+# includeSelectors: false disengaja. Label yang ikut masuk ke selector
+# Deployment bersifat IMMUTABLE — sekali ter-apply, mengubahnya memaksa hapus
+# dan buat ulang seluruh workload. `commonLabels` (yang sudah deprecated)
+# melakukan itu secara diam-diam.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: laravel-stack
+    includeSelectors: false
+
+resources:
+  - namespace.yaml
+  - serviceaccounts.yaml
+  - storage.yaml
+  - mysql.yaml
+  - redis.yaml
+  - app.yaml
+  - caddy.yaml
+  - workers.yaml
+  - migrate-job.yaml
+  - networkpolicies.yaml
+
+# Generator menambahkan hash isi ke nama ConfigMap dan menulis ulang semua
+# referensinya. Efeknya: mengubah konfigurasi otomatis memicu rollout pod yang
+# memakainya.
+#
+# ConfigMap biasa tidak begitu — nilainya berubah di cluster tapi pod yang sudah
+# berjalan tetap memegang nilai lama sampai seseorang me-restart-nya. Itu jenis
+# bug yang sulit dilacak: manifest terlihat benar, perilakunya tidak.
+configMapGenerator:
+  - name: app-config
+    envs:
+      - app-config.env
+  - name: redis-config
+    files:
+      - redis.conf
+  - name: redis-cache-config
+    files:
+      # Key-nya tetap "redis.conf" supaya initContainer kedua Redis identik;
+      # yang berbeda hanya isi filenya.
+      - redis.conf=redis-cache.conf

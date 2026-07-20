@@ -1,0 +1,53 @@
+# =============================================================================
+# L2.5 — Cache Konfigurasi di Waktu yang Salah
+#
+# Dockerfile ini ditulis seorang rekan dengan alasan "biar start-nya lebih cepat".
+# Image berhasil dibangun tanpa error. Setelah di-deploy, aplikasi menyambung ke
+# database yang SALAH — padahal .env di server sudah benar.
+#
+# Tugas Anda:
+#   1. Temukan baris penyebabnya.
+#   2. BUKTIKAN dugaan Anda dengan pengukuran, bukan dengan membaca ulang saja.
+#   3. Perbaiki.
+#
+# Bangun dari akar proyek:
+#     docker build -t lab-l25:bermasalah `
+#         -f lab/starter/L2.5-config-cache/Dockerfile.bermasalah .
+# =============================================================================
+
+FROM php:8.4-fpm-alpine
+
+COPY --from=mlocati/php-extension-installer:2 \
+     /usr/bin/install-php-extensions /usr/local/bin/
+RUN install-php-extensions pcntl posix redis pdo_mysql opcache
+
+WORKDIR /var/www/html
+
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+COPY src/composer.json src/composer.lock ./
+RUN composer install --no-dev --no-scripts --prefer-dist --no-progress
+COPY src/ ./
+RUN composer dump-autoload --no-dev --optimize
+
+# TODO [1] — Salah satu baris di bawah ini adalah penyebabnya.
+#
+#            Pertanyaan penuntun:
+#              - Apa yang sebenarnya DISIMPAN oleh perintah itu ke dalam berkas?
+#              - Environment MILIK SIAPA yang terbaca saat perintah itu berjalan
+#                di dalam `docker build`?
+#              - Sesudah berkas itu ada, apakah env() masih dibaca saat aplikasi
+#                berjalan?
+#
+# TODO [2] — Rancang cara membuktikannya.
+#            Petunjuk: jalankan container dari image ini dengan DB_HOST yang
+#            sengaja dibuat berbeda, lalu bandingkan nilai config yang
+#            benar-benar dipakai aplikasi dengan nilai environment yang Anda beri.
+#
+# TODO [3] — Perbaiki. Perhatikan: menghapus cache di entrypoint memang
+#            menghilangkan gejalanya, tetapi juga membuang manfaat cache-nya.
+#            Yang benar adalah memindahkan WAKTU pembuatannya.
+
+ENV APP_ENV=production
+RUN php artisan config:cache
+
+CMD ["php-fpm", "--nodaemonize"]

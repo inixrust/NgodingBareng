@@ -1,0 +1,22 @@
+/*
+ * Tailwind 4.
+ *
+ * Breeze v2.4 masih men-scaffold untuk Tailwind 3 (direktif @tailwind +
+ * tailwind.config.js + postcss.config.js), sedangkan skeleton Laravel 13
+ * memakai Tailwind 4. Berkas ini disamakan ke v4, dan tailwind.config.js
+ * beserta postcss.config.js bawaan Breeze dihapus — di v4 konfigurasinya
+ * memang tinggal di dalam CSS.
+ */
+@import 'tailwindcss';
+
+@plugin '@tailwindcss/forms';
+
+/* Pengganti array `content` milik tailwind.config.js versi 3 */
+@source '../views';
+@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+
+@theme {
+    --font-sans:
+        'Instrument Sans', ui-sans-serif, system-ui, sans-serif,
+        'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+}

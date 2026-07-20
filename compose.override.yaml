@@ -1,0 +1,161 @@
+# =============================================================================
+# Override untuk pengembangan lokal di Docker Desktop.
+#
+# File ini dimuat OTOMATIS oleh `docker compose up`. Untuk menguji image
+# produksi apa adanya, lewati file ini:
+#
+#     docker compose -f compose.yaml up -d --build
+#
+# Perbedaan utama dibanding produksi:
+#   - kode di-bind-mount dari ./src (edit langsung terlihat, tanpa rebuild)
+#   - target build "dev": ada composer + xdebug, OPcache mengecek perubahan file
+#   - port MySQL & Vite dibuka ke host
+# =============================================================================
+
+services:
+  mysql:
+    ports:
+      # Supaya bisa dibuka dari TablePlus / DBeaver / MySQL Workbench di Windows
+      - "${DB_PORT_HOST:-3306}:3306"
+
+  app: &app-dev
+    build:
+      target: dev
+    # Tag terpisah dari produksi. Tanpa ini, build dev menimpa
+    # laravel-app:latest dan yang ter-deploy justru image berisi Xdebug.
+    image: ${APP_IMAGE:-laravel-app}:dev
+    environment: &app-env-dev
+      APP_ENV: local
+      APP_DEBUG: "true"
+      DB_HOST: mysql
+      DB_PORT: 3306
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_CACHE_HOST: redis-cache
+      REDIS_CACHE_PORT: 6379
+      REDIS_CACHE_PASSWORD: ${REDIS_CACHE_PASSWORD:?REDIS_CACHE_PASSWORD wajib diisi di .env}
+      RUN_MIGRATIONS: "true"
+      # Set ke "debug" untuk mengaktifkan step debugging Xdebug
+      XDEBUG_MODE: "${XDEBUG_MODE:-off}"
+    volumes:
+      # Bind mount menimpa volume "storage" dari compose.yaml karena target sama
+      - ./src:/var/www/html
+      - ./src/storage:/var/www/html/storage
+      # vendor/ berisi ~10.000 file. Membacanya lewat bind mount Windows membuat
+      # tiap request memakan ~2 detik; disimpan di named volume (filesystem Linux)
+      # turun menjadi ~0,15 detik. Diukur pada setup ini.
+      # Konsekuensi: ./src/vendor di host TIDAK ikut ter-update saat menambah
+      # paket. Lihat catatan "composer" di README.
+      - vendor:/var/www/html/vendor
+    extra_hosts:
+      # Diperlukan Xdebug agar bisa menghubungi IDE di Windows
+      - "host.docker.internal:host-gateway"
+
+  redis:
+    ports:
+      # Supaya bisa diinspeksi dari RedisInsight / TablePlus di Windows
+      - "${REDIS_PORT_HOST:-6379}:6379"
+
+  horizon:
+    <<: *app-dev
+    command: ["php", "artisan", "horizon"]
+    environment:
+      <<: *app-env-dev
+      RUN_MIGRATIONS: "false"
+
+  scheduler:
+    <<: *app-dev
+    command: ["php", "artisan", "schedule:work"]
+    environment:
+      <<: *app-env-dev
+      RUN_MIGRATIONS: "false"
+
+  artisan:
+    <<: *app-dev
+    entrypoint: ["php", "artisan"]
+    command: ["list"]
+    environment:
+      <<: *app-env-dev
+      RUN_MIGRATIONS: "false"
+
+  caddy:
+    image: ${APP_IMAGE:-laravel-app}-caddy:dev
+    volumes:
+      # Caddy melayani public/ dari host, bukan salinan di dalam image
+      - ./src/public:/var/www/html/public:ro
+      - ./src/storage:/var/www/html/storage:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    healthcheck:
+      # Request pertama lewat bind mount Windows bisa lambat (OPcache masih dingin)
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8080/up || exit 1"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 90s
+
+  web:
+    image: ${APP_IMAGE:-laravel-app}-web:dev
+    volumes:
+      # Nginx melayani public/ dari host, bukan salinan di dalam image
+      - ./src/public:/var/www/html/public:ro
+      - ./src/storage:/var/www/html/storage:ro
+    healthcheck:
+      # Request pertama lewat bind mount Windows bisa lambat (OPcache masih dingin),
+      # jadi beri toleransi jauh lebih longgar daripada produksi.
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8080/up || exit 1"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 90s
+
+  # ---------------------------------------------------------------------------
+  # Vite dev server — hot module replacement untuk asset frontend.
+  # Buka http://localhost:8080 seperti biasa; Blade akan menarik asset dari 5173.
+  # ---------------------------------------------------------------------------
+  vite:
+    image: node:22-alpine
+    working_dir: /app
+    # `npm install` dijalankan SETIAP start, bukan hanya saat node_modules kosong.
+    # node_modules disimpan di named volume, jadi guard "install kalau belum ada"
+    # membuat dependensi membeku: mengubah package.json tidak berpengaruh apa pun
+    # sampai volume-nya dihapus manual. npm install bersifat idempoten dan hanya
+    # butuh beberapa detik kalau memang tidak ada yang berubah.
+    command: sh -c "npm install --no-audit --no-fund && npm run dev -- --host 0.0.0.0"
+    volumes:
+      - ./src:/app
+      # Alasan sama seperti vendor: node_modules terlalu lambat di bind mount Windows
+      - node_modules:/app/node_modules
+    ports:
+      - "${VITE_PORT:-5173}:5173"
+    environment:
+      # Polling diperlukan karena inotify tidak bekerja lintas bind mount Windows
+      CHOKIDAR_USEPOLLING: "true"
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------------------
+  # Helper Composer. Memakai volume vendor yang sama dengan service app.
+  #   docker compose run --rm composer require nama/paket
+  #   docker compose run --rm composer install
+  # ---------------------------------------------------------------------------
+  composer:
+    <<: *app-dev
+    # Service ini TIDAK ada di compose.yaml, jadi tidak mewarisi context/dockerfile
+    # dari sana — keduanya harus ditulis lengkap di sini.
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+      target: dev
+    image: ${APP_IMAGE:-laravel-app}:dev
+    profiles: ["cli"]
+    restart: "no"
+    entrypoint: ["composer"]
+    command: ["--version"]
+    depends_on: []
+
+volumes:
+  vendor:
+  node_modules:
+  caddy-data:
+  caddy-config:

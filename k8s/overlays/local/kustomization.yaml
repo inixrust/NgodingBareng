@@ -1,0 +1,38 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: laravel
+
+resources:
+  - ../../base
+
+# Secret dibuat dari file lokal yang TIDAK ikut ter-commit (lihat .gitignore).
+# Dengan cara ini tidak ada rahasia yang pernah masuk ke YAML di repo.
+#
+# Kustomize menambahkan hash isi ke nama Secret, sehingga mengganti password
+# otomatis memicu rollout pod yang memakainya — bukan diam-diam tidak berlaku
+# sampai seseorang me-restart pod secara manual.
+secretGenerator:
+  - name: app-secrets
+    envs:
+      - secrets.env
+
+patches:
+  # Image dibangun lokal dan tidak ada di registry mana pun. "Never" membuat
+  # kegagalan jelas (ErrImageNeverPull) alih-alih Kubernetes mencoba menarik
+  # dari Docker Hub lalu memberi error yang membingungkan.
+  - target:
+      kind: Deployment|StatefulSet|Job
+      name: (app|caddy|horizon|scheduler|migrate|mysql)
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+  # initContainer Job migrate juga memakai image lokal yang sama
+  - target:
+      kind: Job
+      name: migrate
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/initContainers/0/imagePullPolicy
+        value: Never

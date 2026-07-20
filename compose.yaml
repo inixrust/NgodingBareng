@@ -1,0 +1,312 @@
+# =============================================================================
+# Stack produksi: nginx (web) -> php-fpm (app) -> MySQL
+#
+#   docker compose up -d --build          # jalankan (lokal ikut compose.override.yaml)
+#   docker compose -f compose.yaml up -d  # jalankan mode produksi murni, tanpa override
+#
+# Semua nilai konfigurasi diambil dari file .env di direktori ini.
+# =============================================================================
+
+name: laravel-app
+
+# ---------------------------------------------------------------------------
+# Blok yang dipakai ulang oleh app / queue / scheduler — ketiganya berbagi
+# image yang sama persis, hanya beda perintah.
+# ---------------------------------------------------------------------------
+x-app-base: &app-base
+  build:
+    context: .
+    dockerfile: docker/php/Dockerfile
+    target: app
+  image: ${APP_IMAGE:-laravel-app}:${APP_TAG:-latest}
+  restart: unless-stopped
+  init: true
+  env_file:
+    - .env
+  environment: &app-env
+    DB_HOST: mysql
+    DB_PORT: 3306
+    REDIS_HOST: redis
+    REDIS_PORT: 6379
+    REDIS_CACHE_HOST: redis-cache
+    REDIS_CACHE_PORT: 6379
+    REDIS_CACHE_PASSWORD: ${REDIS_CACHE_PASSWORD:?REDIS_CACHE_PASSWORD wajib diisi di .env}
+    # Migrasi hanya dijalankan oleh service "app" — di-override per service.
+    RUN_MIGRATIONS: "false"
+  volumes:
+    - storage:/var/www/html/storage
+  depends_on:
+    mysql:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    redis-cache:
+      condition: service_healthy
+  networks:
+    - backend
+
+services:
+  # ---------------------------------------------------------------------------
+  # MySQL
+  # ---------------------------------------------------------------------------
+  mysql:
+    build:
+      context: ./docker/mysql
+      args:
+        MYSQL_VERSION: "8.4"
+    image: ${APP_IMAGE:-laravel-app}-mysql:${APP_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE:-laravel}
+      MYSQL_USER: ${DB_USERNAME:-laravel}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD wajib diisi di .env}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD wajib diisi di .env}
+      MYSQL_ROOT_HOST: localhost
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      # Ping sebagai user aplikasi, bukan root — memastikan grant-nya benar-benar jadi
+      test:
+        - CMD-SHELL
+        - >-
+          mysqladmin ping -h 127.0.0.1
+          -u"$$MYSQL_USER" -p"$$MYSQL_PASSWORD" --silent
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------------------
+  # Redis #1 — queue (Horizon) + session.
+  #
+  # noeviction: data di sini TIDAK BOLEH dibuang. Kalau Redis mengevict job yang
+  # sedang mengantre, job hilang tanpa jejak dan tidak ada yang tahu.
+  # AOF menyala agar antrean selamat dari restart container.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD wajib diisi di .env}
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli --no-auth-warning -a "$$REDIS_PASSWORD" ping | grep -q PONG
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    deploy:
+      resources:
+        limits:
+          memory: 384m
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------------------
+  # Redis #2 — cache saja.
+  #
+  # allkeys-lru: justru DIHARAPKAN membuang entri lama saat penuh — itu memang
+  # sifat cache. Tanpa persistensi, karena isinya bisa dibangun ulang kapan saja.
+  # ---------------------------------------------------------------------------
+  redis-cache:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_CACHE_PASSWORD:?REDIS_CACHE_PASSWORD wajib diisi di .env}
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli --no-auth-warning -a "$$REDIS_PASSWORD" ping | grep -q PONG
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    environment:
+      REDIS_PASSWORD: ${REDIS_CACHE_PASSWORD}
+    deploy:
+      resources:
+        limits:
+          memory: 384m
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------------------
+  # PHP-FPM — memproses request dari web server
+  # ---------------------------------------------------------------------------
+  app:
+    <<: *app-base
+    environment:
+      <<: *app-env
+      # Hanya container ini yang menjalankan migrasi.
+      RUN_MIGRATIONS: "true"
+      # Set "true" hanya bila menjalankan >1 replika DAN cache store bukan database
+      # (lihat penjelasan di docker/php/bin/entrypoint.sh).
+      MIGRATE_ISOLATED: "false"
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+
+  # ---------------------------------------------------------------------------
+  # Caddy — web server DEFAULT. TLS otomatis, konfigurasi jauh lebih ringkas.
+  # Aktif bila COMPOSE_PROFILES memuat "caddy" (lihat .env).
+  # ---------------------------------------------------------------------------
+  caddy:
+    profiles: ["caddy"]
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+      target: caddy
+    image: ${APP_IMAGE:-laravel-app}-caddy:${APP_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8080}:8080"
+      - "${APP_TLS_PORT:-8443}:8443"
+    environment:
+      # Ganti ke domain sungguhan (mis. "app.contoh.com") dan Caddy akan
+      # menerbitkan sertifikat Let's Encrypt sendiri. Untuk itu, petakan port
+      # host 80->8080 dan 443->8443 di atas.
+      SITE_ADDRESS: ${SITE_ADDRESS:-http://localhost:8080}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+    volumes:
+      - storage:/var/www/html/storage:ro
+      # Sertifikat TLS. Wajib persisten — kalau hilang, Caddy meminta ulang
+      # sertifikat tiap restart dan bisa kena rate limit Let's Encrypt.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      app:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------------------
+  # Nginx — web server ALTERNATIF. Aktif bila COMPOSE_PROFILES memuat "nginx".
+  # Fungsional setara Caddy, minus TLS otomatis.
+  # ---------------------------------------------------------------------------
+  web:
+    profiles: ["nginx"]
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+      target: web
+    image: ${APP_IMAGE:-laravel-app}-web:${APP_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    volumes:
+      # Dibutuhkan agar upload di disk "public" bisa dilayani tanpa lewat PHP
+      - storage:/var/www/html/storage:ro
+    depends_on:
+      app:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------------------
+  # Horizon — supervisor queue Redis. Menggantikan `queue:work`.
+  #
+  # Horizon mengelola sendiri proses worker-nya (jumlah, auto-scaling, restart),
+  # jadi tidak perlu --max-time seperti queue:work biasa.
+  # Dashboard: /horizon
+  # ---------------------------------------------------------------------------
+  horizon:
+    <<: *app-base
+    command: ["php", "artisan", "horizon"]
+    # Horizon menangkap SIGTERM lalu menunggu job yang sedang berjalan selesai.
+    # Beri waktu cukup supaya job tidak terpotong di tengah saat deploy.
+    stop_signal: SIGTERM
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD", "php", "artisan", "horizon:status"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 640m
+
+  # ---------------------------------------------------------------------------
+  # Scheduler (pengganti cron)
+  # ---------------------------------------------------------------------------
+  scheduler:
+    <<: *app-base
+    command: ["php", "artisan", "schedule:work"]
+    healthcheck:
+      disable: true
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    environment:
+      <<: *app-env
+      # Horizon punya perintah terjadwal sendiri (horizon:snapshot) yang
+      # dijalankan lewat scheduler ini — lihat routes/console.php.
+      RUN_MIGRATIONS: "false"
+
+  # ---------------------------------------------------------------------------
+  # Helper sekali jalan. Tidak ikut `up` karena memakai profile.
+  #   docker compose run --rm artisan migrate:status
+  #   docker compose run --rm artisan tinker
+  # ---------------------------------------------------------------------------
+  artisan:
+    <<: *app-base
+    profiles: ["cli"]
+    restart: "no"
+    environment:
+      <<: *app-env
+      RUN_MIGRATIONS: "false"
+    entrypoint: ["php", "artisan"]
+    command: ["list"]
+
+volumes:
+  mysql-data:
+  redis-data:
+  caddy-data:
+  caddy-config:
+  storage:
+
+networks:
+  backend:
+    driver: bridge

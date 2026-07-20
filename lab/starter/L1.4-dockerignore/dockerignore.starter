@@ -1,0 +1,31 @@
+# =============================================================================
+# L1.4 — Menyusun .dockerignore
+#
+# Berkas ini SENGAJA hampir kosong. Tugas Anda melengkapinya.
+#
+# Cara memakai: salin ke akar proyek dengan nama .dockerignore
+#     Copy-Item lab\starter\L1.4-dockerignore\dockerignore.starter .dockerignore
+#
+# PERINGATAN: proyek sudah punya .dockerignore yang lengkap. Cadangkan dulu:
+#     Copy-Item .dockerignore .dockerignore.asli
+# dan kembalikan setelah selesai.
+# =============================================================================
+
+.git
+
+# TODO [2] — Tambahkan entri untuk TIGA kategori berikut. Untuk setiap entri,
+#            tuliskan juga alasannya sebagai komentar — alasan itulah yang
+#            ditanyakan di lembar jawaban.
+#
+#   (a) RAHASIA
+#       Berkas apa yang berisi password dan kunci aplikasi?
+#       Apa akibatnya bila ia ikut tertanam di dalam image yang dikirim ke registry?
+#
+#   (b) DEPENDENSI YANG DIBANGUN ULANG
+#       Direktori mana yang isinya dipasang ulang di stage vendor dan assets?
+#       Mengirimkannya ke build context hanya memperlambat, tanpa manfaat.
+#
+#   (c) ARTEFAK RUNTIME DAN MODE PENGEMBANGAN
+#       Berkas apa yang dibuat Vite saat mode pengembangan?
+#       Apa yang terjadi pada tampilan produksi bila berkas itu ikut terbawa?
+#       (petunjuk: isinya sebuah alamat)

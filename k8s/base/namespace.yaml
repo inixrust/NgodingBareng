@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: laravel
+  labels:
+    # Pod Security Admission, level paling ketat yang disediakan Kubernetes.
+    # "enforce" menolak pod yang melanggar; "warn" dan "audit" membuat
+    # pelanggaran tetap terlihat di kubectl dan audit log.
+    #
+    # Konsekuensi nyata dari "restricted": semua container WAJIB non-root,
+    # tidak boleh privilege escalation, harus drop seluruh capability, dan
+    # harus memakai seccomp RuntimeDefault. Semua workload di sini sudah
+    # disesuaikan untuk itu — termasuk php-fpm, yang secara default
+    # menjalankan proses master sebagai root.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest

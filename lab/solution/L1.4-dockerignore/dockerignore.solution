@@ -1,0 +1,55 @@
+# =============================================================================
+# L1.4 — SOLUSI
+#
+# Setiap entri disertai alasannya. Peserta tidak wajib menulis komentar
+# selengkap ini, tetapi harus bisa MENJELASKAN alasan tiap kategori.
+# =============================================================================
+
+.git
+
+# --- (a) RAHASIA -------------------------------------------------------------
+# Image umumnya dikirim ke registry dan bisa ditarik banyak orang. Siapa pun yang
+# bisa menariknya dapat membaca seluruh isinya, termasuk password database dan
+# APP_KEY. Mengganti password setelah bocor pun tidak menghapus image lama yang
+# sudah beredar.
+.env
+.env.*
+!.env.example
+src/.env
+src/.env.*
+
+# --- (b) DEPENDENSI YANG DIBANGUN ULANG --------------------------------------
+# Keduanya dipasang ulang di stage vendor dan assets. Mengirimkannya ke build
+# context hanya memperlambat build tanpa manfaat apa pun — dan pada bind mount
+# Windows, vendor/ saja berisi sekitar 10.000 berkas.
+src/vendor
+src/node_modules
+
+# --- (c) ARTEFAK RUNTIME DAN MODE PENGEMBANGAN -------------------------------
+# public/build: hasil build Vite, disalin dari stage assets — bukan dari host.
+src/public/build
+
+# public/hot: dibuat Vite saat mode pengembangan, isinya alamat dev server
+# (http://localhost:5173). Bila ikut ke produksi, Laravel menganggap dev server
+# sedang berjalan dan memuat SELURUH aset dari alamat itu. Di server, semua CSS
+# dan JavaScript gagal dimuat dan tampilan rusak total.
+src/public/hot
+
+# public/storage: symlink yang dibuat ulang oleh entrypoint.
+src/public/storage
+
+# Artefak runtime — dibuat ulang setiap container start.
+src/storage/framework/cache/*
+src/storage/framework/sessions/*
+src/storage/framework/views/*
+src/storage/logs/*
+src/bootstrap/cache/*
+# Penanda struktur direktori tetap dipertahankan.
+!src/storage/app/.gitignore
+!src/bootstrap/cache/.gitignore
+
+# --- Tidak wajib, tetapi menunjukkan pemahaman yang benar --------------------
+.DS_Store
+Thumbs.db
+.idea
+.vscode

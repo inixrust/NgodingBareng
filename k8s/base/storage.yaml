@@ -1,0 +1,20 @@
+# Volume untuk file upload (disk "public" milik Laravel).
+#
+# ReadWriteMany karena dipakai bersama oleh beberapa replika app DAN oleh Caddy,
+# yang melayani /storage/* langsung dari disk tanpa melewati PHP.
+#
+# CATATAN PRODUKSI: RWX di sini berhasil karena Docker Desktop hanya punya satu
+# node, sehingga hostpath cukup. Di cluster multi-node, hostpath TIDAK akan
+# bekerja — pakai object storage (driver s3 Laravel) atau CSI yang benar-benar
+# mendukung RWX seperti NFS/CephFS/EFS.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: app-storage
+  namespace: laravel
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 2Gi

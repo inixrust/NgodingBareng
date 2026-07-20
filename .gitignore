@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+
+# Direktori runtime yang dibuat container saat mode dev
+src/public/hot
+src/public/storage
+src/public/build
+
+# Rahasia Kubernetes
+k8s/overlays/*/secrets.env
+
+# Modul
+pelatihan

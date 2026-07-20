@@ -1,0 +1,253 @@
+# Dua instance Redis terpisah.
+#
+# Kebijakan eviction Redis berlaku per-server, bukan per-database. Kalau cache
+# dan queue berbagi satu instance, pilihannya cuma dua dan dua-duanya buruk:
+# allkeys-lru boleh membuang job yang masih mengantre (hilang diam-diam), atau
+# noeviction membuat penulisan cache gagal begitu memori penuh.
+#
+# Password TIDAK pernah muncul di command line. initContainer menempelkannya ke
+# file konfigurasi di emptyDir; `ps` di dalam pod hanya melihat path file.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: laravel
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: laravel
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/component: queue-store
+    spec:
+      serviceAccountName: redis
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: render-config
+          image: redis:8-alpine
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              cat /config-src/redis.conf > /config/redis.conf
+              printf 'requirepass %s\n' "$REDIS_PASSWORD" >> /config/redis.conf
+              chmod 0400 /config/redis.conf
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: app-secrets, key: REDIS_PASSWORD }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 32Mi }
+          volumeMounts:
+            - name: config-src
+              mountPath: /config-src
+              readOnly: true
+            - name: config
+              mountPath: /config
+      containers:
+        - name: redis
+          image: redis:8-alpine
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          command: ["redis-server", "/config/redis.conf"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          env:
+            # redis-cli membaca REDISCLI_AUTH dari environment, sehingga probe
+            # tidak perlu menulis password sebagai argumen `-a`.
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef: { name: app-secrets, key: REDIS_PASSWORD }
+          startupProbe:
+            exec: { command: ["sh", "-c", "redis-cli ping | grep -q PONG"] }
+            periodSeconds: 3
+            failureThreshold: 30
+          readinessProbe:
+            exec: { command: ["sh", "-c", "redis-cli ping | grep -q PONG"] }
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            exec: { command: ["sh", "-c", "redis-cli ping | grep -q PONG"] }
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 384Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: config-src
+          configMap:
+            name: redis-config
+        - name: config
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+# --- Redis #2: cache ---------------------------------------------------------
+# Deployment, bukan StatefulSet: isinya boleh hilang kapan saja.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-cache
+  namespace: laravel
+spec:
+  selector:
+    app.kubernetes.io/name: redis-cache
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-cache
+  namespace: laravel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis-cache
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis-cache
+        app.kubernetes.io/component: cache
+    spec:
+      serviceAccountName: redis
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: render-config
+          image: redis:8-alpine
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              cat /config-src/redis.conf > /config/redis.conf
+              printf 'requirepass %s\n' "$REDIS_PASSWORD" >> /config/redis.conf
+              chmod 0400 /config/redis.conf
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: app-secrets, key: REDIS_CACHE_PASSWORD }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 32Mi }
+          volumeMounts:
+            - name: config-src
+              mountPath: /config-src
+              readOnly: true
+            - name: config
+              mountPath: /config
+      containers:
+        - name: redis
+          image: redis:8-alpine
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          command: ["redis-server", "/config/redis.conf"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          env:
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef: { name: app-secrets, key: REDIS_CACHE_PASSWORD }
+          startupProbe:
+            exec: { command: ["sh", "-c", "redis-cli ping | grep -q PONG"] }
+            periodSeconds: 3
+            failureThreshold: 20
+          readinessProbe:
+            exec: { command: ["sh", "-c", "redis-cli ping | grep -q PONG"] }
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            exec: { command: ["sh", "-c", "redis-cli ping | grep -q PONG"] }
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 384Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: config-src
+          configMap:
+            name: redis-cache-config
+        - name: config
+          emptyDir: {}
+        - name: data
+          emptyDir: {}

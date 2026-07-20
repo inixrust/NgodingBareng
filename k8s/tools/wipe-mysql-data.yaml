@@ -1,0 +1,75 @@
+# Job sekali-jalan untuk mengosongkan datadir MySQL.
+#
+# KENAPA INI PERLU ADA
+# --------------------
+# Provisioner hostpath bawaan Docker Desktop memetakan volume berdasarkan NAMA
+# PVC. Menghapus PVC (bahkan sampai PV-nya hilang) TIDAK menghapus isi direktori
+# di host. PVC baru dengan nama sama akan menemukan data lama masih utuh.
+#
+# Akibatnya, kalau inisialisasi MySQL pernah terputus di tengah, datadir tetap
+# berisi tabel sistem tapi TANPA user aplikasi. MySQL akan start normal —
+# entrypoint resminya melewati inisialisasi karena datadir tidak kosong — dan
+# aplikasi gagal dengan pesan menyesatkan:
+#   SQLSTATE[HY000] [1130] Host '10.x.x.x' is not allowed to connect
+# Menghapus PVC saja TIDAK memperbaikinya. Datadir harus dikosongkan eksplisit.
+#
+# CARA PAKAI
+#   kubectl scale statefulset/mysql -n laravel --replicas=0
+#   kubectl wait --for=delete pod/mysql-0 -n laravel --timeout=120s
+#   kubectl apply -f k8s/tools/wipe-mysql-data.yaml
+#   kubectl wait --for=condition=complete job/wipe-mysql-data -n laravel --timeout=120s
+#   kubectl delete -f k8s/tools/wipe-mysql-data.yaml
+#   kubectl scale statefulset/mysql -n laravel --replicas=1
+#
+# INI MENGHAPUS SELURUH ISI DATABASE. Jangan dijalankan kecuali memang diniatkan.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wipe-mysql-data
+  namespace: laravel
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wipe-mysql-data
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # uid/gid mysql, supaya file yang dibuat MySQL bisa dihapus
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: wipe
+          image: redis:8-alpine
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              echo "sebelum: $(ls -A /data | wc -l) entri"
+              # find, bukan `rm -rf /data`: mount point-nya sendiri harus tetap ada
+              find /data -mindepth 1 -delete
+              echo "sesudah: $(ls -A /data | wc -l) entri"
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data-mysql-0

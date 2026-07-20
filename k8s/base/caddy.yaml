@@ -1,0 +1,132 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: caddy
+  namespace: laravel
+spec:
+  # Docker Desktop memetakan LoadBalancer ke localhost, jadi tidak perlu
+  # memasang ingress controller hanya untuk bisa membuka aplikasinya.
+  # Di cloud, ganti ke ClusterIP dan pasang Ingress di depannya.
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: caddy
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: caddy
+  namespace: laravel
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: caddy
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: caddy
+        app.kubernetes.io/component: web
+    spec:
+      serviceAccountName: caddy
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        # fsGroup 82 (www-data), BUKAN 10001: volume storage ditulis oleh
+        # pod app sebagai uid 82. Menjadikannya group tambahan di sini membuat
+        # Caddy bisa membaca file upload tanpa perlu ikut memilikinya.
+        fsGroup: 82
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: caddy
+          image: laravel-app-caddy:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # ":8080" = dengarkan semua interface, HTTP saja. "localhost:8080"
+            # akan menolak probe kubelet yang datang dari IP node.
+            # TLS diterminasi Ingress/LoadBalancer, bukan di sini.
+            - name: SITE_ADDRESS
+              value: ":8080"
+          startupProbe:
+            httpGet: { path: /up, port: http }
+            periodSeconds: 3
+            failureThreshold: 40
+          readinessProbe:
+            httpGet: { path: /up, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            # /up menembus sampai PHP, jadi ini menguji seluruh rantai.
+            # Sengaja lebih longgar dari readiness: app yang sedang sibuk
+            # sebaiknya dikeluarkan dari load balancer, bukan dibunuh.
+            httpGet: { path: /up, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: storage
+              mountPath: /var/www/html/storage
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /config
+            - name: tmp
+              mountPath: /tmp
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: app-storage
+            readOnly: true
+        # Sertifikat TLS. emptyDir cukup karena TLS di sini diterminasi di depan
+        # Caddy. Kalau Caddy dibuat mengurus ACME sendiri, ganti ke PVC —
+        # kehilangan /data berarti minta sertifikat ulang tiap restart dan bisa
+        # kena rate limit Let's Encrypt.
+        - name: data
+          emptyDir: {}
+        - name: config
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: caddy
+  namespace: laravel
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: caddy

@@ -1,0 +1,39 @@
+# =============================================================================
+# L2.1 — SOLUSI
+#
+# Menjalankan (dari akar proyek):
+#     docker compose -f compose.yaml -f compose.override.yaml \
+#         -f lab/solution/L2.1-service-baru/compose.lab.yaml up -d
+#
+# Lalu buka http://localhost:8025
+# =============================================================================
+
+services:
+
+  # [1] Definisi service
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      # HANYA 8025 yang dipublikasikan: antarmuka web dibuka MANUSIA dari
+      # browser di Windows, jadi harus bisa dijangkau dari luar container.
+      #
+      # Port 1025 (SMTP) TIDAK dipublikasikan: yang menghubunginya adalah
+      # container app dari dalam jaringan backend. Mempublikasikannya hanya
+      # menambah permukaan yang terbuka, tanpa manfaat.
+      - "${MAILPIT_PORT:-8025}:8025"
+    networks:
+      # KUNCI WAJIB. Tanpa baris ini, Compose menaruh mailpit di jaringan
+      # default-nya sendiri. Service tetap menyala dan `docker compose ps`
+      # tampak normal, tetapi aplikasi gagal me-resolve nama "mailpit" —
+      # kesalahan yang paling sering terjadi pada latihan ini.
+      - backend
+    environment:
+      # Batasi retensi agar tidak tumbuh tanpa batas selama pelatihan
+      MP_MAX_MESSAGES: "500"
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8025/livez"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

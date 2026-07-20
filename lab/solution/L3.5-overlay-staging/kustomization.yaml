@@ -1,0 +1,63 @@
+# =============================================================================
+# L3.5 — SOLUSI
+#
+# Base tidak disentuh sama sekali. Seluruh perbedaan lingkungan hidup di sini.
+#
+# Salin ke k8s/overlays/staging/ lalu periksa:
+#     Copy-Item lab\solution\L3.5-overlay-staging k8s\overlays\staging -Recurse
+#     kubectl kustomize k8s/overlays/staging
+# =============================================================================
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# [2] Namespace terpisah agar staging tidak menyentuh apa pun milik lokal
+namespace: laravel-staging
+
+# [2] Dua tingkat ke atas dari k8s/overlays/staging/ menuju k8s/base/
+resources:
+  - ../../base
+
+# [2] Secret milik staging sendiri — TIDAK berbagi berkas dengan lokal.
+#     Berbagi rahasia antar lingkungan berarti kebocoran di satu lingkungan
+#     langsung menjadi kebocoran di lingkungan lain.
+secretGenerator:
+  - name: app-secrets
+    envs:
+      - secrets.env
+
+# [2] behavior: merge menimpa HANYA kunci yang disebut di sini.
+#     Seluruh kunci lain tetap diambil dari base — tidak perlu menyalin ulang
+#     app-config.env, sehingga perbaikan di base otomatis ikut terpakai.
+configMapGenerator:
+  - name: app-config
+    behavior: merge
+    literals:
+      - LOG_LEVEL=debug
+      - APP_URL=http://staging.localhost
+
+# [2] Satu replika saja untuk staging
+patches:
+  - target:
+      kind: Deployment
+      name: app
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+
+  # Image tetap dibangun lokal, sama seperti overlay local
+  - target:
+      kind: Deployment|StatefulSet|Job
+      name: (app|caddy|horizon|scheduler|migrate|mysql)
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+  - target:
+      kind: Job
+      name: migrate
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/initContainers/0/imagePullPolicy
+        value: Never

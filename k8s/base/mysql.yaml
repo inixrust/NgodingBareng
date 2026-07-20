@@ -1,0 +1,141 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: laravel
+spec:
+  # Headless: StatefulSet butuh identitas DNS stabil per pod.
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: mysql
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: laravel
+spec:
+  serviceName: mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mysql
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mysql
+        app.kubernetes.io/component: database
+    spec:
+      serviceAccountName: mysql
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        # Hanya chown ulang bila ownership root volume belum cocok — jauh lebih
+        # cepat daripada "Always" pada volume berisi banyak file.
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mysql
+          image: laravel-app-mysql:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: mysql
+              containerPort: 3306
+          env:
+            - name: MYSQL_DATABASE
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: DB_DATABASE }
+            - name: MYSQL_USER
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: DB_USERNAME }
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: app-secrets, key: DB_PASSWORD }
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: app-secrets, key: DB_ROOT_PASSWORD }
+            # Batasi akun root hanya bisa dipakai dari dalam container itu sendiri
+            - name: MYSQL_ROOT_HOST
+              value: "localhost"
+            # Dipakai probe di bawah. JANGAN diberi nama MYSQL_PWD:
+            # klien `mysql` membaca variabel itu secara otomatis, termasuk saat
+            # entrypoint resmi MySQL menyiapkan database lewat temporary server
+            # yang root-nya masih berpassword KOSONG. Akibatnya inisialisasi
+            # gagal dengan "Access denied for user 'root'@'localhost'", keluar
+            # dengan exit 1, dan meninggalkan datadir setengah jadi: tabel sistem
+            # ada, user aplikasi tidak. Sesudah itu MySQL start normal selamanya
+            # (datadir tidak kosong lagi → init dilewati) sementara aplikasi
+            # ditolak dengan "Host ... is not allowed to connect".
+            - name: APP_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: app-secrets, key: DB_PASSWORD }
+          # PENTING: probe benar-benar melakukan query terautentikasi sebagai user
+          # aplikasi, bukan sekadar `mysqladmin ping`.
+          #
+          # `mysqladmin ping` keluar dengan status 0 bahkan ketika autentikasi
+          # DITOLAK — server menjawab, dan itu sudah cukup baginya. Akibatnya
+          # datadir yang setengah terinisialisasi (user aplikasi belum sempat
+          # dibuat) tetap dilaporkan Ready, dan yang gagal justru aplikasinya
+          # dengan pesan "Host ... is not allowed to connect" yang menyesatkan.
+          startupProbe:
+            exec:
+              command:
+                ["sh", "-c", 'MYSQL_PWD="$APP_DB_PASSWORD" mysql -h 127.0.0.1 -u"$MYSQL_USER" -D"$MYSQL_DATABASE" -e "SELECT 1" >/dev/null']
+            periodSeconds: 5
+            # Inisialisasi database pertama kali bisa lama; beri sampai ~5 menit
+            # sebelum menyerah, tanpa mengorbankan liveness yang ketat setelahnya.
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command:
+                ["sh", "-c", 'MYSQL_PWD="$APP_DB_PASSWORD" mysql -h 127.0.0.1 -u"$MYSQL_USER" -D"$MYSQL_DATABASE" -e "SELECT 1" >/dev/null']
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                ["sh", "-c", 'MYSQL_PWD="$APP_DB_PASSWORD" mysqladmin ping -h 127.0.0.1 -u"$MYSQL_USER" --silent']
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+            # rootfs read-only, tapi MySQL tetap butuh menulis socket dan file
+            # sementara. emptyDir memenuhinya tanpa membuka seluruh filesystem.
+            - name: run
+              mountPath: /var/run/mysqld
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 4Gi

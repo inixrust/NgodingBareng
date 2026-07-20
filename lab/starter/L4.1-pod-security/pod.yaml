@@ -1,0 +1,43 @@
+# =============================================================================
+# L4.1 — Memperbaiki Manifest yang Ditolak
+#
+# Manifest ini DITOLAK oleh namespace berlabel Pod Security restricted.
+#
+# Tugas Anda:
+#   1. Coba terapkan, lalu BACA pesan penolakannya dengan teliti.
+#   2. Perbaiki sampai diterima — TANPA menurunkan tingkat keamanan namespace.
+#
+#     kubectl apply -f lab/starter/L4.1-pod-security/pod.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: latihan-pss
+  namespace: laravel
+  labels:
+    app.kubernetes.io/name: latihan-pss
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+
+  # TODO [3] — Pesan penolakan menyebut setiap pelanggaran satu per satu.
+  #            Ada EMPAT. Perbaiki semuanya.
+  #
+  #            Perhatikan bahwa sebagian setelan berada di tingkat POD
+  #            (berlaku untuk seluruh container) dan sebagian di tingkat
+  #            CONTAINER. Tentukan mana yang mana.
+  #
+  #            Catatan: image busybox berjalan sebagai root secara bawaan.
+  #
+  # securityContext:
+
+  containers:
+    - name: alat
+      image: busybox:1.37
+      command: ["sh", "-c", "sleep 300"]
+      # securityContext:
+
+# TODO [4] — Setelah berhasil, jawab: kenapa menurunkan label namespace menjadi
+#            `baseline` BUKAN penyelesaian yang benar, walaupun manifest ini
+#            langsung diterima bila itu dilakukan?

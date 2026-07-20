@@ -1,0 +1,40 @@
+# =============================================================================
+# L2.1 — Menambah Service Baru ke Stack
+#
+# Tambahkan Mailpit: server SMTP palsu yang menangkap seluruh email saat
+# pengembangan, sehingga tidak ada email yang benar-benar terkirim.
+#
+# Menjalankan (dari akar proyek):
+#     docker compose -f compose.yaml -f compose.override.yaml \
+#         -f lab/starter/L2.1-service-baru/compose.lab.yaml up -d
+# =============================================================================
+
+services:
+
+  # TODO [1] — Lengkapi definisi service di bawah ini.
+  #
+  #   Yang sudah diketahui tentang image axllent/mailpit:latest
+  #     - SMTP        : port 1025  (dihubungi APLIKASI, dari dalam jaringan)
+  #     - Antarmuka web: port 8025 (dibuka MANUSIA, dari browser di Windows)
+  #
+  #   Pertanyaan yang harus Anda jawab lewat konfigurasi ini:
+  #     (a) Port mana yang perlu dipublikasikan ke host, dan mana yang tidak?
+  #         Siapa yang menghubungi masing-masing?
+  #     (b) Satu kunci WAJIB agar aplikasi bisa me-resolve nama service ini.
+  #         Tanpa kunci itu, service tetap menyala tetapi aplikasi gagal
+  #         menyambung. Kunci apa?
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    # ports:
+    # networks:
+
+# TODO [2] — Arahkan Laravel ke service ini.
+#
+#   Ubah tiga variabel di berkas .env pada akar proyek:
+#       MAIL_MAILER=?
+#       MAIL_HOST=?
+#       MAIL_PORT=?
+#
+#   Perhatian: MAIL_HOST TIDAK boleh diisi localhost. Kenapa?
+#   (petunjuk: di dalam container, localhost menunjuk ke mana?)

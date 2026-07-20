@@ -1,0 +1,157 @@
+# Segmentasi jaringan: tolak semua dulu, lalu izinkan jalur yang memang perlu.
+#
+# Tanpa ini, SETIAP pod di cluster bisa membuka koneksi langsung ke MySQL dan
+# Redis. Pod yang berhasil dikompromikan di namespace lain pun bisa.
+#
+# PERIKSA DULU: NetworkPolicy hanya berlaku kalau CNI cluster mendukungnya.
+# CNI bawaan Docker Desktop TIDAK menerapkannya — manifest ini tetap diterima
+# API server tapi tidak memblokir apa pun. Ia disertakan supaya benar saat
+# dipindah ke cluster sungguhan (Calico, Cilium, dsb.). Cara memverifikasinya
+# ada di k8s/README.md.
+
+# --- Default deny: semua ingress DAN egress ditolak --------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: laravel
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# --- DNS: dibutuhkan semua pod untuk me-resolve nama Service -----------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: laravel
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# --- Caddy: menerima traffic dari luar, meneruskan ke app --------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: caddy
+  namespace: laravel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: caddy
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Sumbernya adalah LoadBalancer/Ingress di luar cluster, jadi tidak bisa
+    # dipersempit dengan podSelector.
+    - ports:
+        - { protocol: TCP, port: 8080 }
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: app
+      ports:
+        - { protocol: TCP, port: 9000 }
+---
+# --- app / horizon / scheduler / migrate: boleh ke MySQL dan Redis -----------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: app-egress
+  namespace: laravel
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [app, horizon, scheduler, migrate]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mysql
+      ports:
+        - { protocol: TCP, port: 3306 }
+    - to:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [redis, redis-cache]
+      ports:
+        - { protocol: TCP, port: 6379 }
+---
+# --- app: FastCGI hanya boleh dihubungi Caddy --------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: app-ingress
+  namespace: laravel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: app
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: caddy
+      ports:
+        - { protocol: TCP, port: 9000 }
+---
+# --- MySQL: hanya menerima dari workload PHP --------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mysql-ingress
+  namespace: laravel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mysql
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [app, horizon, scheduler, migrate]
+      ports:
+        - { protocol: TCP, port: 3306 }
+---
+# --- Redis: hanya menerima dari workload PHP --------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-ingress
+  namespace: laravel
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [redis, redis-cache]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [app, horizon, scheduler, migrate]
+      ports:
+        - { protocol: TCP, port: 6379 }

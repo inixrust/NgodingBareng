@@ -1,0 +1,82 @@
+# =============================================================================
+# Caddy sebagai web server Laravel.
+#
+# Port di dalam container sengaja 8080/8443 (bukan 80/443) supaya Caddy bisa
+# berjalan sebagai user non-root tanpa CAP_NET_BIND_SERVICE. Petakan
+# 80->8080 dan 443->8443 di compose bila ingin HTTPS otomatis dari Let's Encrypt.
+# =============================================================================
+
+{
+	# Endpoint admin tidak dibutuhkan dan membuka permukaan serangan
+	admin off
+
+	http_port 8080
+	https_port 8443
+
+	# Diisi hanya saat SITE_ADDRESS berupa domain sungguhan (untuk ACME)
+	email {$ACME_EMAIL:admin@example.com}
+
+	servers {
+		# Percayai header X-Forwarded-* hanya dari jaringan privat (mis. saat
+		# Caddy berada di belakang load balancer cloud)
+		trusted_proxies static private_ranges
+	}
+}
+
+# Default http://localhost:8080. Untuk produksi set SITE_ADDRESS=contoh.com
+# dan Caddy akan mengurus sertifikat TLS-nya sendiri.
+{$SITE_ADDRESS:http://localhost:8080} {
+	root * /var/www/html/public
+
+	encode zstd gzip
+
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	# PENTING: semua handler dibungkus `route` karena Caddy TIDAK mengeksekusi
+	# direktif sesuai urutan penulisan — ada urutan bawaan sendiri. Tanpa `route`,
+	# blok `respond 403` di bawah kalah dari `file_server` dan /.htaccess justru
+	# tersaji dengan status 200. Di dalam `route`, urutan penulisan dihormati.
+	route {
+		# Tolak dotfile, kecuali /.well-known yang dipakai ACME.
+		# Regex Caddy memakai RE2 (Go) yang TIDAK mendukung negative lookahead,
+		# jadi pengecualiannya ditulis sebagai kondisi `not` terpisah.
+		@dotfiles {
+			path_regexp /\.
+			not path /.well-known/*
+		}
+		respond @dotfiles 403
+
+		# Sejajarkan dengan nginx: /index.php tidak boleh diakses langsung
+		@indexphp path /index.php
+		redir @indexphp / 308
+
+		# Upload disk "public" dilayani langsung dari volume storage, tanpa PHP
+		handle_path /storage/* {
+			root * /var/www/html/storage/app/public
+			file_server
+		}
+
+		handle {
+			# Nama file asset Vite sudah ber-hash → aman di-cache selamanya
+			@immutable path /build/*
+			header @immutable Cache-Control "public, max-age=31536000, immutable"
+
+			# php_fastcgi sudah otomatis: try_files {path} {path}/index.php index.php
+			php_fastcgi app:9000 {
+				trusted_proxies private_ranges
+			}
+
+			file_server
+		}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

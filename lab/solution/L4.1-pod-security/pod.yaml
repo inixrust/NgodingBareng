@@ -1,0 +1,45 @@
+# =============================================================================
+# L4.1 — SOLUSI
+#
+#     kubectl apply -f lab/solution/L4.1-pod-security/pod.yaml
+#     kubectl get pod latihan-pss -n laravel
+#     kubectl delete pod latihan-pss -n laravel
+# =============================================================================
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: latihan-pss
+  namespace: laravel
+  labels:
+    app.kubernetes.io/name: latihan-pss
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+
+  # [3] Tingkat POD — berlaku untuk seluruh container di dalamnya.
+  securityContext:
+    # Pelanggaran 1: runAsNonRoot != true
+    runAsNonRoot: true
+    # Angka bebas ASALKAN bukan 0. Menyetel runAsUser: 0 tetap root dan
+    # tetap ditolak.
+    runAsUser: 1000
+    runAsGroup: 1000
+    # Pelanggaran 2: seccompProfile belum diset
+    seccompProfile:
+      type: RuntimeDefault
+
+  containers:
+    - name: alat
+      image: busybox:1.37
+      command: ["sh", "-c", "sleep 300"]
+      # [3] Tingkat CONTAINER — keduanya memang hanya ada di tingkat ini.
+      securityContext:
+        # Pelanggaran 3
+        allowPrivilegeEscalation: false
+        # Pelanggaran 4
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { memory: 64Mi }

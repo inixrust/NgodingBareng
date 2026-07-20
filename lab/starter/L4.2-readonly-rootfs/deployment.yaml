@@ -1,0 +1,96 @@
+# =============================================================================
+# L4.2 — Menemukan Direktori yang Perlu Writable
+#
+# Deployment ini memakai readOnlyRootFilesystem: true dan GAGAL. Pod tidak
+# pernah mencapai status Ready.
+#
+# Tugas Anda:
+#   1. Terapkan, lalu lihat kenapa gagal.
+#   2. Temukan direktori mana saja yang benar-benar perlu ditulis — BUKTIKAN
+#      satu per satu, jangan menebak dari ingatan.
+#   3. Pasang HANYA direktori itu sebagai volume.
+#
+# DILARANG: mematikan readOnlyRootFilesystem, atau memasang seluruh
+#           /var/www/html sebagai volume.
+#
+#     kubectl apply -f lab/starter/L4.2-readonly-rootfs/deployment.yaml
+#     kubectl get pod -n laravel -l app.kubernetes.io/name=latihan-ro
+#     kubectl logs -n laravel -l app.kubernetes.io/name=latihan-ro
+# =============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: latihan-ro
+  namespace: laravel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: latihan-ro
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: latihan-ro
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 82
+        runAsGroup: 82
+        fsGroup: 82
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: php-fpm
+          image: laravel-app:latest
+          imagePullPolicy: Never
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # Lab ini SENGAJA tidak memakai envFrom ke ConfigMap/Secret proyek.
+          # Nama keduanya dibangkitkan Kustomize dengan imbuhan hash, sehingga
+          # rujukan bernama polos akan gagal dengan CreateContainerConfigError —
+          # error yang tidak ada hubungannya dengan pelajaran lab ini dan justru
+          # menyesatkan. Nilai di bawah cukup untuk membuat entrypoint berjalan.
+          env:
+            - name: APP_ENV
+              value: production
+            - name: APP_KEY
+              value: base64:bGFiLXJlYWRvbmx5LXJvb3Rmcy1kdW1teS1rZXktMzJi
+            - name: LOG_CHANNEL
+              value: stderr
+            - name: WAIT_FOR_DB
+              value: "false"
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+
+          # TODO [2] — Uji satu per satu direktori berikut dari dalam container
+          #            yang sedang berjalan, dan catat mana yang gagal ditulis:
+          #
+          #              /var/www/html/storage
+          #              /var/www/html/bootstrap/cache
+          #              /tmp
+          #
+          #            Perintah untuk mengujinya ada di README lab ini.
+          #
+          # TODO [3] — Pasang HANYA yang gagal sebagai volumeMounts di bawah,
+          #            dan tentukan jenis volume yang tepat untuk masing-masing:
+          #
+          #              - Mana yang isinya HARUS bertahan melewati restart pod?
+          #                (petunjuk: berkas unggahan pengguna ada di salah satunya)
+          #              - Mana yang isinya dibangun ulang setiap start, sehingga
+          #                emptyDir sudah cukup?
+          #
+          # volumeMounts:
+
+      # TODO [3] — Definisikan volume-nya di sini.
+      # volumes:
+
+# TODO [4] — Setelah pod Ready, jalankan:
+#                kubectl exec ... -- php artisan tinker --execute="echo 1;"
+#            Perintah itu masih gagal. Kenapa, dan bagaimana memperbaikinya
+#            tanpa mematikan readOnlyRootFilesystem?

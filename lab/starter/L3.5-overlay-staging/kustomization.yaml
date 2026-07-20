@@ -1,0 +1,44 @@
+# =============================================================================
+# L3.5 — Membuat Overlay Staging
+#
+# Buat overlay yang berbeda dari overlay lokal dalam TIGA hal:
+#   - namespace          : laravel-staging
+#   - replika aplikasi   : 1
+#   - LOG_LEVEL          : debug
+#
+# SYARAT MUTLAK: berkas di k8s/base/ TIDAK BOLEH diubah sama sekali.
+#
+# Salin direktori ini ke k8s/overlays/staging/ lalu kerjakan di sana:
+#     Copy-Item lab\starter\L3.5-overlay-staging k8s\overlays\staging -Recurse
+#
+# Periksa hasilnya TANPA menerapkan:
+#     kubectl kustomize k8s/overlays/staging
+# =============================================================================
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# TODO [2] — Tentukan namespace tujuan.
+# namespace:
+
+# TODO [2] — Rujuk base. Perhatikan kedalaman direktori: berkas ini berada di
+#            k8s/overlays/staging/, sedangkan base ada di k8s/base/.
+resources: []
+
+# TODO [2] — Buat Secret untuk staging.
+#            Overlay lokal memakai secretGenerator dengan berkas secrets.env.
+#            Staging butuh berkasnya sendiri — jangan berbagi dengan lokal.
+# secretGenerator:
+
+# TODO [2] — Ubah LOG_LEVEL menjadi debug TANPA menyalin ulang seluruh
+#            app-config.env milik base.
+#
+#            Petunjuk: configMapGenerator punya kunci `behavior` yang menentukan
+#            apa yang terjadi bila nama generatornya sama dengan yang sudah ada
+#            di base. Nilai apa yang menimpa SATU kunci saja?
+# configMapGenerator:
+
+# TODO [2] — Ubah jumlah replika Deployment app menjadi 1.
+#            Boleh memakai patch JSON, boleh memakai kunci `replicas` bawaan
+#            Kustomize. Keduanya benar.
+# patches:

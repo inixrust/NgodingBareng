@@ -25,6 +25,7 @@ overlay Kustomize. Tidak ada satu pun manifest yang diduplikasi.
 | 9 | [Troubleshooting](docs/09-troubleshooting.md) | 11 masalah umum, penyebab, dan solusinya |
 | 10 | [Verifikasi](docs/10-verifikasi.md) | daftar periksa lengkap |
 | 11 | [Deploy On-Prem Lab](docs/11-deploy-onprem-lab.md) | langkah demi langkah ke klaster kubeadm 192.168.50.x, tanpa registry (overlay `onprem-lab`) |
+| 12 | [Walkthrough Docker Desktop](docs/12-walkthrough-docker-desktop.md) | narasi run nyata sampai 24/24 lulus — 3 kegagalan yang benar-benar muncul dan cara mengatasinya |
 
 ## Quickstart — Docker Desktop
 

@@ -1,5 +1,11 @@
 # 8. Deployment Lengkap
 
+> **Ingin narasi run yang sesungguhnya?** Bagian 8.1 di bawah adalah jalur
+> ideal (happy path). Untuk walkthrough lengkap sebuah run nyata — termasuk
+> tiga kegagalan yang benar-benar muncul (LimitRange, Secret tertimpa, exec
+> rusak) dan cara memecahkannya sampai `verify.sh` melaporkan 24/24 — lihat
+> [docs/12](12-walkthrough-docker-desktop.md).
+
 ## 8.1 Docker Desktop (Development)
 
 ### Prasyarat

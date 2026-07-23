@@ -30,6 +30,40 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
+      # Horizon menghubungi Redis SAAT BOOT untuk mulai mengawasi queue. Bila
+      # DNS Redis belum siap (pod Redis belum Ready), ia keluar dengan
+      # "getaddrinfo for redis failed" dan crash-loop sampai Redis hidup.
+      # initContainer ini menahan start sampai dependensi benar-benar bisa
+      # dihubungi — pola yang sama dengan migrate-job.
+      initContainers:
+        - name: wait-for-deps
+          image: laravel-app:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              wait_for() {
+                echo "menunggu $1:$2 ..."
+                until php -r 'exit(@fsockopen($argv[1], (int) $argv[2], $e, $s, 2) ? 0 : 1);' "$1" "$2"; do
+                  sleep 2
+                done
+                echo "$1:$2 siap."
+              }
+              wait_for "$DB_HOST" "$DB_PORT"
+              wait_for "$REDIS_HOST" "$REDIS_PORT"
+              wait_for "$REDIS_CACHE_HOST" "$REDIS_CACHE_PORT"
+          envFrom:
+            - configMapRef: { name: app-config }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
       containers:
         - name: horizon
           image: laravel-app:latest
@@ -109,6 +143,38 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
+      # schedule:work membaca konfigurasi dan bisa langsung menyentuh Redis/DB
+      # saat boot. Menahan start sampai dependensi siap mencegah crash-loop
+      # cold-start yang sama seperti pada Horizon.
+      initContainers:
+        - name: wait-for-deps
+          image: laravel-app:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              wait_for() {
+                echo "menunggu $1:$2 ..."
+                until php -r 'exit(@fsockopen($argv[1], (int) $argv[2], $e, $s, 2) ? 0 : 1);' "$1" "$2"; do
+                  sleep 2
+                done
+                echo "$1:$2 siap."
+              }
+              wait_for "$DB_HOST" "$DB_PORT"
+              wait_for "$REDIS_HOST" "$REDIS_PORT"
+              wait_for "$REDIS_CACHE_HOST" "$REDIS_CACHE_PORT"
+          envFrom:
+            - configMapRef: { name: app-config }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
       containers:
         - name: scheduler
           image: laravel-app:latest

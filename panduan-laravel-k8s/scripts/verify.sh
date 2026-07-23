@@ -47,11 +47,21 @@ uji "StatefulSet mariadb siap" \
 uji "StatefulSet redis siap" \
     "kubectl -n $NS get sts redis -o jsonpath='{.status.readyReplicas}'" '^[1-9]'
 
-babak "2. Stabilitas (tidak ada restart)"
-# Restart yang menumpuk adalah gejala probe terlalu ketat atau OOMKill.
-# Ini sering luput karena Pod-nya tetap terlihat "Running".
-uji "Tidak ada Pod dengan restart > 2" \
-    "kubectl -n $NS get pods --no-headers | awk '\$4>2' | wc -l" '^\s*0$'
+babak "2. Stabilitas (tidak ada restart TAK NORMAL)"
+# Jumlah restart mentah MENYESATKAN untuk stack ini: queue worker sengaja
+# keluar bersih (exit 0) tiap jam karena --max-time=3600, lalu dihidupkan
+# ulang oleh restartPolicy Always. Itu daur-ulang yang sehat, bukan crash.
+#
+# Yang benar-benar gejala buruk adalah terminasi TAK NORMAL: OOMKilled atau
+# Error (exit != 0) — itulah tanda probe terlalu ketat, memory limit
+# kekecilan, atau aplikasi crash. Kita periksa lastState.terminated.reason
+# tiap container, bukan angka restart.
+# awk (bukan grep|wc): dengan pipefail, grep yang TIDAK menemukan apa-apa --
+# yaitu keadaan SEHAT di sini -- keluar kode 1 dan menggagalkan pemeriksaan.
+# awk menghitung sendiri dan selalu exit 0.
+uji "Tidak ada container yang mati OOMKilled/Error" \
+    "kubectl -n $NS get pods -o jsonpath='{range .items[*].status.containerStatuses[*]}{.lastState.terminated.reason}{\"\n\"}{end}' \
+     | awk '/OOMKilled|Error/{n++} END{print n+0}'" '^0$'
 
 babak "3. Jaringan"
 uji "Service laravel-web punya endpoint" \

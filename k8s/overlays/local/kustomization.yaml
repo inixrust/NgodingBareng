@@ -28,10 +28,11 @@ patches:
       - op: replace
         path: /spec/template/spec/containers/0/imagePullPolicy
         value: Never
-  # initContainer Job migrate juga memakai image lokal yang sama
+  # initContainer wait-for-deps (migrate, horizon, scheduler) memakai image
+  # lokal yang sama — Never juga supaya konsisten.
   - target:
-      kind: Job
-      name: migrate
+      kind: Job|Deployment
+      name: (migrate|horizon|scheduler)
     patch: |-
       - op: replace
         path: /spec/template/spec/initContainers/0/imagePullPolicy

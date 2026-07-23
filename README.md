@@ -14,7 +14,12 @@ nyaman dipakai untuk ngoding sehari-hari di Docker Desktop (Windows).
 ├── docker/
 │   ├── php/                # Dockerfile multi-stage + konfigurasi PHP/FPM
 │   ├── nginx/              # konfigurasi nginx
+│   ├── caddy/              # Caddyfile
 │   └── mysql/              # image MySQL + my.cnf
+├── k8s/                    # manifest Kubernetes (Kustomize)
+│   ├── base/               # sumber tunggal: semua Deployment/StatefulSet/Service
+│   ├── overlays/local/     # overlay Docker Desktop (secrets.env + imagePullPolicy)
+│   └── tools/              # utilitas (wipe data mysql)
 └── src/                    # aplikasi Laravel 13
 ```
 
@@ -273,6 +278,184 @@ Set juga `APP_ENV=production`, `APP_DEBUG=false`, dan `LOG_LEVEL=warning` di
 > Catatan: flag `--env-file` hanya memengaruhi interpolasi `${...}` di dalam file
 > compose, **bukan** direktif `env_file:` yang diteruskan ke container. Nilai yang
 > diterima aplikasi selalu berasal dari `.env`.
+
+## Deploy ke Kubernetes (Docker Desktop)
+
+Selain Docker Compose, stack ini juga bisa dijalankan di Kubernetes bawaan
+Docker Desktop lewat manifest di `k8s/`. Prosesnya sudah diuji end-to-end:
+9 Pod Running + Job migrate Completed, `http://localhost` membalas 200 dengan
+halaman Laravel, MySQL 8.4.10 dengan migrasi terpasang, Redis dan cache
+terhubung, seluruh proses non-root, dan Horizon/scheduler start bersih tanpa
+restart (setelah initContainer `wait-for-deps` ditambahkan).
+
+### Prasyarat
+
+Aktifkan Kubernetes: Docker Desktop → Settings → Kubernetes → Enable, lalu:
+
+```powershell
+kubectl config use-context docker-desktop
+kubectl get nodes    # docker-desktop  Ready  control-plane
+```
+
+### Langkah 1 — Build tiga image
+
+Manifest memakai `imagePullPolicy: Never` (overlay local), jadi image **wajib**
+ada di daemon Docker lokal — Docker Desktop berbagi daemon image dengan
+Kubernetes-nya, jadi cukup `docker build`, tanpa push.
+
+```powershell
+# aplikasi (php-fpm) — stage "app"
+docker build -f docker/php/Dockerfile --target app   -t laravel-app:latest .
+# caddy — stage "caddy" (sudah membawa public/)
+docker build -f docker/php/Dockerfile --target caddy -t laravel-app-caddy:latest .
+# mysql — config di-bake agar tidak diabaikan karena world-writable
+docker build -f docker/mysql/Dockerfile -t laravel-app-mysql:latest docker/mysql
+```
+
+> Kalau ingin nginx sebagai pengganti Caddy, build juga
+> `--target web -t laravel-app-web:latest` dan sesuaikan manifest-nya.
+
+### Langkah 2 — Siapkan rahasia
+
+Rahasia dibuat dari file lokal yang **tidak** ikut ter-commit (`.gitignore`
+sudah mengecualikan `k8s/overlays/*/secrets.env`). Kustomize menambahkan hash
+isi ke nama Secret, jadi mengganti password otomatis memicu rollout pod —
+bukan diam-diam tidak berlaku.
+
+```powershell
+cd k8s/overlays/local
+Copy-Item secrets.env.example secrets.env
+# buat APP_KEY:
+docker run --rm laravel-app:latest php artisan key:generate --show
+# tempel hasilnya ke APP_KEY, lalu isi DB_PASSWORD, DB_ROOT_PASSWORD,
+# REDIS_PASSWORD, REDIS_CACHE_PASSWORD dengan nilai acak
+cd ../../..
+```
+
+### Langkah 3 — Deploy
+
+```powershell
+kubectl apply -k k8s/overlays/local
+```
+
+Urutan boot ditangani sendiri oleh manifest: Service MySQL/Redis headless,
+Job `migrate` punya initContainer `wait-for-deps` yang menunggu database +
+Redis siap, dan **Horizon serta scheduler juga menunggu dependensinya**
+sebelum start (mencegah crash-loop cold-start saat Redis belum ter-resolve).
+
+Tunggu berlapis — data dulu, migrasi, lalu aplikasi (urutan ini yang dipakai
+saat menguji):
+
+```powershell
+kubectl -n laravel rollout status statefulset/mysql --timeout=300s
+kubectl -n laravel wait --for=condition=complete job/migrate --timeout=300s
+kubectl -n laravel rollout status deployment/caddy   --timeout=240s
+kubectl -n laravel rollout status deployment/app     --timeout=240s
+kubectl -n laravel rollout status deployment/horizon --timeout=120s
+```
+
+Lalu periksa semua Pod:
+
+```powershell
+kubectl -n laravel get pods
+```
+
+```
+NAME                          READY   STATUS      RESTARTS   AGE
+app-...                       1/1     Running     0          2m
+app-...                       1/1     Running     0          2m
+caddy-...                     1/1     Running     0          2m
+caddy-...                     1/1     Running     0          2m
+horizon-...                   1/1     Running     0          2m
+migrate-...                   0/1     Completed   0          2m
+mysql-0                       1/1     Running     0          2m
+redis-0                       1/1     Running     0          2m
+redis-cache-...               1/1     Running     0          2m
+scheduler-...                 1/1     Running     0          2m
+```
+
+> `horizon` sempat `0/1` selama ~20–30 detik saat pertama start — itu jeda
+> readiness probe `horizon:status`, **bukan** crash (RESTARTS tetap 0). Berkat
+> initContainer `wait-for-deps`, ia tidak lagi crash-loop menunggu Redis
+> seperti sebelum perbaikan.
+
+### Langkah 4 — Akses di browser
+
+Service `caddy` bertipe `LoadBalancer`, dan Docker Desktop memetakannya ke
+`localhost`. Buka:
+
+**http://localhost**
+
+Tidak perlu ingress controller maupun mengedit berkas hosts. Terverifikasi
+saat pengujian: `caddy` mendapat `EXTERNAL-IP: localhost` dan `http://localhost`
+membalas **200** dengan halaman selamat datang Laravel.
+
+> **Port 80 hanya bisa dimiliki satu Service.** Kalau ada deployment lain yang
+> sudah mengambil `localhost:80` (mis. sebuah ingress controller dari demo
+> lain), Service Caddy tidak akan kebagian port itu — dan `http://localhost`
+> akan menampilkan **404 milik controller itu**, bukan aplikasi Anda.
+>
+> Gejala nyata yang ditemui saat menguji: sebuah ingress-nginx dari deployment
+> lain yang ikut memakai **namespace `laravel`** menyita port 80. Karena
+> project ini juga men-deploy ke namespace `laravel`, keduanya tidak bisa
+> hidup bersamaan. Yang berhasil: singkirkan deployment lain itu **seluruhnya**
+> sebelum deploy project ini —
+>
+> ```powershell
+> # hapus namespace demo lain + namespace ingress-nya (membebaskan port 80)
+> kubectl delete namespace laravel ingress-nginx
+> # (abaikan pesan timeout pada ingress-nginx; penghapusan tetap berjalan)
+> # tunggu benar-benar hilang, lalu deploy ulang project ini:
+> kubectl apply -k k8s/overlays/local
+> ```
+>
+> Kalau Anda justru ingin **kedua** deployment tetap ada, jalankan yang kedua
+> di namespace berbeda dan akses lewat port-forward (tanpa butuh port 80):
+>
+> ```powershell
+> kubectl -n laravel port-forward svc/caddy 8080:80
+> #    lalu buka http://localhost:8080
+> ```
+
+### Langkah 5 — Verifikasi
+
+```powershell
+# HTTP dari luar
+curl.exe -s -o NUL -w "%{http_code}`n" http://localhost/        # 200
+curl.exe -s -o NUL -w "%{http_code}`n" http://localhost/up      # 200
+curl.exe -s -o NUL -w "%{http_code}`n" http://localhost/.env    # 403
+
+# Dari dalam pod (butuh kubectl exec berfungsi)
+kubectl -n laravel exec deploy/app -c php-fpm -- php artisan db:show
+kubectl -n laravel exec deploy/app -c php-fpm -- php artisan migrate:status
+```
+
+> **Kalau `kubectl exec` gagal** dengan `http: server gave HTTP response to
+> HTTPS client`, itu bug streaming containerd pada sebagian Docker Desktop —
+> **bukan** masalah aplikasi (`kubectl logs` tetap jalan, dan HTTP sudah 200).
+> Biasanya pulih setelah Docker Desktop di-restart. Sebagai alternatif,
+> pemeriksaan dalam-pod bisa dijalankan lewat Job sekali-pakai yang
+> hasilnya dibaca dari `kubectl logs`.
+
+### Update image tanpa downtime
+
+```powershell
+docker build -f docker/php/Dockerfile --target app -t laravel-app:latest .
+kubectl -n laravel rollout restart deployment/app deployment/caddy deployment/horizon
+kubectl -n laravel rollout status deployment/app
+```
+
+### Membongkar
+
+```powershell
+kubectl delete -k k8s/overlays/local
+# PVC (data MySQL/Redis) TIDAK ikut terhapus — hapus manual bila ingin bersih:
+kubectl -n laravel delete pvc --all
+```
+
+> Menghapus PVC MySQL belum tentu menghapus datadir di disk (provisioner
+> hostpath memetakan berdasarkan nama PVC). Untuk benar-benar mengulang dari
+> nol, pakai `k8s/tools/wipe-mysql-data.yaml`.
 
 ## Sebelum benar-benar dipakai di produksi
 

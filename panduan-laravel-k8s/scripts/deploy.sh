@@ -90,8 +90,12 @@ kubectl apply -k "$OVERLAY"
 # variabel lingkungan hanya dibaca saat container start. Anotasi ber-hash di
 # bawah memaksa template Pod berubah, sehingga Deployment melakukan rollout.
 log "menyinkronkan checksum konfigurasi"
-HASH=$(kubectl -n "$NS" get configmap laravel-config secret/laravel-secret \
-        -o yaml 2>/dev/null | sha256sum | cut -c1-16)
+# Dua perintah get terpisah lalu digabung — kubectl menolak mengambil
+# ConfigMap dan Secret bernama spesifik dalam satu perintah (baik bentuk
+# "cm x secret y" maupun "cm/x secret/y" tidak sah).
+HASH=$( { kubectl -n "$NS" get configmap laravel-config -o yaml 2>/dev/null
+          kubectl -n "$NS" get secret    laravel-secret -o yaml 2>/dev/null
+        } | sha256sum | cut -c1-16)
 for d in laravel-fpm laravel-queue; do
     kubectl -n "$NS" patch deployment "$d" \
         -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"checksum/config\":\"$HASH\"}}}}}" \

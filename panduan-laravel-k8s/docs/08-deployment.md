@@ -40,6 +40,16 @@ composer create-project laravel/laravel src
 # atau salin proyek yang sudah ada ke src/
 ```
 
+> **WAJIB: buat `package-lock.json`.** `composer create-project` hanya
+> menjalankan Composer, **tidak** menjalankan npm — sehingga `src/package-lock.json`
+> belum ada. Padahal stage `assets` di Dockerfile memakai `npm ci` yang
+> **mensyaratkan** lock file itu; tanpanya, build gagal di
+> `COPY src/package-lock.json` atau di `npm ci`. Buat tanpa memasang apa pun:
+>
+> ```bash
+> cd src && npm install --package-lock-only && cd ..
+> ```
+
 ### Langkah 3 — Build image
 
 ```bash

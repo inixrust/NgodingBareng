@@ -37,8 +37,9 @@ kubectl config use-context docker-desktop
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.12.0/deploy/static/provider/cloud/deploy.yaml
 kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=180s
 
-# 2. Kode Laravel
+# 2. Kode Laravel (+ package-lock.json yang diwajibkan Dockerfile stage assets)
 composer create-project laravel/laravel src
+cd src && npm install --package-lock-only && cd ..
 
 # 3. Deploy
 ./scripts/deploy.sh docker-desktop          # atau: .\scripts\deploy.ps1

@@ -1,0 +1,99 @@
+# ============================================================================
+# Redis #2 — CACHE saja (tanpa persistensi)
+#
+# Instance ini sengaja memakai Deployment, bukan StatefulSet, karena:
+#   - tidak ada state yang perlu diselamatkan (cache boleh hilang kapan saja)
+#   - tidak butuh identitas stabil
+#   - tidak butuh PVC sama sekali -> tidak terikat pada Node mana pun
+#
+# Kebijakan allkeys-lru: saat memori penuh, key paling jarang dipakai dibuang.
+# Itulah perilaku yang MEMANG diinginkan dari sebuah cache.
+# ============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-cache
+  labels:
+    app.kubernetes.io/name: redis-cache
+    app.kubernetes.io/component: cache
+spec:
+  replicas: 1
+  # Recreate, bukan RollingUpdate: dua Pod cache yang hidup bersamaan akan
+  # membuat sebagian request membaca cache lama dan sebagian cache kosong.
+  # Cache memang boleh hilang, jadi mengganti langsung lebih sederhana.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis-cache
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis-cache
+        app.kubernetes.io/component: cache
+    spec:
+      serviceAccountName: laravel
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          imagePullPolicy: IfNotPresent
+
+          command: ["redis-server"]
+          args:
+            - --save
+            - ""                        # matikan snapshot: murni in-memory
+            - --appendonly
+            - "no"
+            - --maxmemory
+            - "256mb"
+            - --maxmemory-policy
+            - "allkeys-lru"
+
+          ports:
+            - name: redis
+              containerPort: 6379
+
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "320Mi"
+            limits:
+              memory: "320Mi"
+              cpu: "500m"
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            # Redis tetap menyentuh /data walau persistensi mati.
+            - name: data
+              mountPath: /data
+
+      volumes:
+        - name: data
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi

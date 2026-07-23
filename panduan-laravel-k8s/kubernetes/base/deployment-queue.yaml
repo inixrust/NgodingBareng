@@ -1,0 +1,151 @@
+# ============================================================================
+# Queue Worker
+#
+# Deployment terpisah, dengan image yang SAMA persis dengan php-fpm — hanya
+# perintahnya yang berbeda. Ini penting: worker menjalankan kode aplikasi yang
+# identik, sehingga tidak mungkin terjadi selisih versi antara web dan worker.
+#
+# Kenapa tidak dijalankan sebagai proses tambahan di dalam Pod php-fpm?
+#   - Skalanya berbeda. Lonjakan trafik web dan tumpukan antrian tidak
+#     berkorelasi; masing-masing perlu HPA sendiri.
+#   - Siklus hidupnya berbeda. Worker perlu waktu mati yang panjang untuk
+#     menyelesaikan job; web justru harus cepat berhenti.
+#   - Kegagalannya berbeda. Worker yang macet tidak boleh membuat situs mati.
+# ============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: laravel-queue
+  labels:
+    app.kubernetes.io/name: laravel-queue
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: laravel-queue
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: laravel-queue
+        app.kubernetes.io/component: worker
+    spec:
+      serviceAccountName: laravel
+      automountServiceAccountToken: false
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+
+      # --- PENGHENTIAN YANG RAPI --------------------------------------------
+      # Ini nilai paling penting di berkas ini.
+      #
+      # queue:work menangkap SIGTERM, MENYELESAIKAN job yang sedang berjalan,
+      # lalu keluar. Kubernetes memberi waktu sebesar terminationGracePeriod
+      # sebelum mengirim SIGKILL.
+      #
+      # Nilainya harus LEBIH BESAR daripada job terlama Anda. Kalau tidak,
+      # SIGKILL memotong job di tengah jalan: pekerjaannya setengah jadi,
+      # tetapi sudah dihapus dari antrian.
+      terminationGracePeriodSeconds: 120
+
+      initContainers:
+        - name: tunggu-dependensi
+          image: busybox:1.37
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z mariadb 3306; do sleep 2; done
+              until nc -z redis 6379; do sleep 2; done
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: "10m", memory: "16Mi" }
+            limits:   { cpu: "100m", memory: "32Mi" }
+
+      containers:
+        - name: queue
+          image: laravel-app/php:latest
+          imagePullPolicy: IfNotPresent
+
+          command: ["php", "artisan", "queue:work", "redis"]
+          args:
+            - --queue=high,default,low   # urutan prioritas
+            - --tries=3                  # 3 percobaan, lalu masuk failed_jobs
+            - --backoff=10               # jeda antar percobaan (detik)
+            - --max-jobs=1000            # daur ulang proses (cegah bocor memori)
+            - --max-time=3600            # atau setelah 1 jam, mana yang duluan
+            - --timeout=60               # satu job maksimal 60 detik
+            - --sleep=3                  # jeda saat antrian kosong
+            - --rest=0
+
+          envFrom:
+            - configMapRef: { name: laravel-config }
+            - secretRef:    { name: laravel-secret }
+
+          # Worker tidak punya endpoint HTTP, jadi probe-nya berbasis proses.
+          # Yang diperiksa: apakah masih ada proses queue:work yang hidup.
+          # Kalau worker crash tanpa keluar dari container, probe ini yang
+          # menangkapnya.
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pgrep -f 'artisan queue:work' >/dev/null"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Sengaja TIDAK ada readinessProbe: worker tidak melayani Service
+          # apa pun, jadi konsep "siap menerima trafik" tidak berlaku.
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+
+          volumeMounts:
+            # Worker sering memproses berkas unggahan, jadi butuh akses tulis
+            # ke PVC yang sama dengan php-fpm.
+            - name: storage-app
+              mountPath: /var/www/html/storage/app/public
+            - name: storage-framework
+              mountPath: /var/www/html/storage/framework
+            - name: bootstrap-cache
+              mountPath: /var/www/html/bootstrap/cache
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: storage-app
+          persistentVolumeClaim:
+            claimName: laravel-storage
+        - name: storage-framework
+          emptyDir: {}
+        - name: bootstrap-cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

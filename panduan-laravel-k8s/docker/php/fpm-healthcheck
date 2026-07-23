@@ -1,0 +1,15 @@
+#!/bin/sh
+# Probe kesehatan PHP-FPM yang sesungguhnya.
+#
+# Kenapa bukan tcpSocket:9000 saja? Karena port 9000 sudah terbuka sejak
+# master PHP-FPM start, bahkan ketika seluruh worker macet. Probe TCP akan
+# melaporkan "sehat" pada Pod yang sebenarnya tidak bisa melayani apa pun.
+#
+# cgi-fcgi benar-benar berbicara protokol FastCGI dan menunggu jawaban dari
+# sebuah worker, sehingga kemacetan pool ikut terdeteksi.
+set -e
+env -i \
+  SCRIPT_NAME=/fpm-ping \
+  SCRIPT_FILENAME=/fpm-ping \
+  REQUEST_METHOD=GET \
+  cgi-fcgi -bind -connect 127.0.0.1:9000 | grep -q pong

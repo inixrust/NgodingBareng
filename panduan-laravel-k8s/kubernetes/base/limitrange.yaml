@@ -1,0 +1,72 @@
+# ============================================================================
+# LimitRange — default dan batas per container
+#
+# Tiga peran berbeda yang sering tertukar:
+#
+#   default          -> LIMITS yang dipasang bila container tidak menyebutkan
+#   defaultRequest   -> REQUESTS yang dipasang bila container tidak menyebutkan
+#   min / max        -> rentang yang boleh diminta; di luar itu Pod DITOLAK
+#
+# Tanpa LimitRange, ResourceQuota akan menolak setiap Pod yang lupa menulis
+# requests/limits. Dengan LimitRange, Pod semacam itu tetap diterima dengan
+# nilai default yang masuk akal.
+#
+# Ini juga jaring pengaman untuk Pod sekali pakai:
+#   kubectl run uji --image=busybox:1.37 --rm -it -- sh
+# yang tidak menyebutkan resource apa pun.
+# ============================================================================
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: laravel-limits
+spec:
+  limits:
+    # ------------------------------------------------------- per container
+    - type: Container
+      # PENTING: default dan defaultRequest harus KONSISTEN dengan
+      # maxLimitRequestRatio di bawah. 512Mi/128Mi = rasio 4 akan ditolak
+      # oleh rasio memori 2 -- artinya setiap Pod yang mengandalkan default
+      # (kubectl run tanpa resources) justru gagal dibuat. Kesalahan ini
+      # ditemukan saat verifikasi nyata, bukan teori.
+      default:
+        cpu: "500m"
+        memory: "256Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+      min:
+        cpu: "10m"
+        memory: "16Mi"
+      max:
+        # Plafon per container. Satu container tidak boleh meminta lebih
+        # besar daripada Node terkecil di klaster -- kalau melampaui, Pod-nya
+        # Pending selamanya karena tidak ada Node yang muat.
+        cpu: "2"
+        memory: "2Gi"
+      # Rasio limit terhadap request: limit CPU paling banyak 10x request.
+      # Ini mencegah ekstrem seperti "request 10m, limit 2 CPU" -- konfigurasi
+      # yang membuat scheduler mengira Pod-nya ringan padahal bisa memakan
+      # satu Node penuh.
+      #
+      # Kenapa 10, bukan lebih ketat? Karena stack ini SENGAJA burstable pada
+      # CPU (queue 100m->1000m, nginx 50m->500m): CPU bersifat compressible,
+      # jadi membiarkan Pod memakai CPU menganggur tidak berbahaya. Catatan
+      # dari pengalaman: rasio yang lebih ketat daripada beban kerjanya
+      # menolak Pod saat DIBUAT (bukan saat apply), sehingga lolos dry-run
+      # dan baru meledak di klaster -- periksa dengan `kubectl get events`.
+      maxLimitRequestRatio:
+        cpu: "10"
+        memory: "2"
+
+    # ------------------------------------------------------------- per Pod
+    - type: Pod
+      max:
+        cpu: "4"
+        memory: "4Gi"
+
+    # --------------------------------------------------------------- PVC
+    - type: PersistentVolumeClaim
+      min:
+        storage: "1Gi"
+      max:
+        storage: "20Gi"

@@ -1,0 +1,116 @@
+# ============================================================================
+# Job Migrasi Database
+#
+# --- KENAPA JOB TERPISAH, BUKAN DI ENTRYPOINT? ----------------------------
+# Dengan 2+ replika php-fpm, menaruh `php artisan migrate` di entrypoint
+# berarti semua replika menjalankannya bersamaan saat rollout. Job terpisah
+# menjamin migrasi berjalan TEPAT SATU KALI, dengan log dan status keluar
+# sendiri yang bisa dijadikan gerbang di pipeline CI/CD.
+#
+# --- CATATAN PENTING TENTANG APPLY ULANG ----------------------------------
+# spec sebuah Job bersifat IMMUTABLE. `kubectl apply` kedua kalinya akan
+# gagal dengan "field is immutable". Ada tiga cara menanganinya:
+#
+#   1. Hapus lalu buat ulang (dipakai scripts/migrate.sh):
+#        kubectl delete job db-migrate --ignore-not-found
+#        kubectl apply -k overlays/<env>
+#   2. Beri nama unik per rilis, mis. lewat nameSuffix di overlay.
+#   3. Pakai ttlSecondsAfterFinished (di bawah) supaya Job lama terhapus
+#      sendiri, lalu apply berikutnya membuatnya lagi.
+#
+# --- KENAPA --isolated? ---------------------------------------------------
+# --isolated mengambil lock di cache store sebelum bermigrasi, sehingga
+# beberapa proses yang berjalan bersamaan tetap aman.
+#
+# Ini AMAN di sini karena CACHE_STORE=redis. Bila cache store-nya "database",
+# --isolated justru mengunci dirinya sendiri: tabel cache_locks yang mau
+# dipakai untuk mengunci baru akan DIBUAT oleh migrasi yang sedang menunggu
+# lock itu. Jebakan ini nyata dan sulit didiagnosis.
+# ============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+  labels:
+    app.kubernetes.io/name: db-migrate
+    app.kubernetes.io/component: migration
+spec:
+  backoffLimit: 3               # 3 percobaan bila gagal karena masalah sesaat
+  ttlSecondsAfterFinished: 600  # bersihkan sendiri setelah 10 menit
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: db-migrate
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: Never
+      serviceAccountName: laravel
+      automountServiceAccountToken: false
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+
+      initContainers:
+        - name: tunggu-database
+          image: busybox:1.37
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "until nc -z mariadb 3306; do echo menunggu-db; sleep 2; done"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: "10m", memory: "16Mi" }
+            limits:   { cpu: "100m", memory: "32Mi" }
+
+      containers:
+        - name: migrate
+          image: laravel-app/php:latest
+          imagePullPolicy: IfNotPresent
+
+          # --force wajib: tanpa itu Laravel menolak bermigrasi di APP_ENV
+          # production dan malah menunggu jawaban interaktif yang tak pernah
+          # datang -- Job menggantung sampai kena timeout.
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              php artisan migrate --force --isolated
+              php artisan db:show --counts || true
+
+          envFrom:
+            - configMapRef: { name: laravel-config }
+            - secretRef:    { name: laravel-secret }
+
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "1000m", memory: "512Mi" }
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+
+          volumeMounts:
+            - name: storage-framework
+              mountPath: /var/www/html/storage/framework
+            - name: bootstrap-cache
+              mountPath: /var/www/html/bootstrap/cache
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: storage-framework
+          emptyDir: {}
+        - name: bootstrap-cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

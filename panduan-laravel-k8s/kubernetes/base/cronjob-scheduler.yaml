@@ -1,0 +1,118 @@
+# ============================================================================
+# Laravel Scheduler
+#
+# Di server tradisional, scheduler dipasang sebagai satu baris crontab:
+#     * * * * * php artisan schedule:run
+#
+# Di Kubernetes, CronJob-lah padanannya. schedule:run dipanggil setiap menit;
+# Laravel sendiri yang memutuskan tugas mana yang jatuh tempo menit ini.
+#
+# --- KENAPA CronJob, BUKAN Deployment schedule:work? ----------------------
+# Keduanya sah. Perbandingannya:
+#
+#   CronJob (dipakai di sini)
+#     + Kubernetes yang memegang jadwal -> terlihat di `kubectl get cronjob`
+#     + Tiap eksekusi punya Pod dan log sendiri; riwayatnya bisa ditelusuri
+#     + Tidak memakai resource di antara eksekusi
+#     - Ada overhead start container tiap menit (~2-5 detik)
+#
+#   Deployment `php artisan schedule:work`
+#     + Tanpa overhead start
+#     - Satu proses panjang; kalau mati diam-diam, tidak ada yang menyadari
+#     - Log semua tugas menumpuk di satu Pod
+#
+# --- YANG PALING SERING SALAH ---------------------------------------------
+# concurrencyPolicy: Forbid. Tanpa ini, tugas yang berjalan lebih dari satu
+# menit akan ditumpuk eksekusi berikutnya -- dan dua salinan tugas yang sama
+# berjalan bersamaan hampir selalu berarti data ganda.
+# ============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: laravel-scheduler
+  labels:
+    app.kubernetes.io/name: laravel-scheduler
+    app.kubernetes.io/component: scheduler
+spec:
+  schedule: "* * * * *"          # setiap menit, persis seperti crontab Laravel
+  timeZone: "Asia/Jakarta"       # field stabil sejak Kubernetes v1.27
+
+  concurrencyPolicy: Forbid      # lihat catatan di atas
+  startingDeadlineSeconds: 30    # lewat 30 detik, lewati saja menit ini
+
+  successfulJobsHistoryLimit: 3  # simpan 3 Pod sukses terakhir untuk log
+  failedJobsHistoryLimit: 3      # dan 3 yang gagal, untuk diagnosis
+
+  jobTemplate:
+    spec:
+      backoffLimit: 0            # jangan ulang; menit berikutnya akan datang
+      ttlSecondsAfterFinished: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: laravel-scheduler
+            app.kubernetes.io/component: scheduler
+        spec:
+          restartPolicy: Never
+          serviceAccountName: laravel
+          automountServiceAccountToken: false
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+
+          # 55 detik: sedikit di bawah interval jadwal, supaya eksekusi yang
+          # macet tidak menabrak eksekusi berikutnya.
+          activeDeadlineSeconds: 55
+
+          containers:
+            - name: scheduler
+              image: laravel-app/php:latest
+              imagePullPolicy: IfNotPresent
+
+              command: ["php", "artisan", "schedule:run", "--verbose", "--no-interaction"]
+
+              envFrom:
+                - configMapRef: { name: laravel-config }
+                - secretRef:    { name: laravel-secret }
+
+              env:
+                # config:cache di entrypoint memakan 1-3 detik. Untuk proses
+                # yang hidup 5 detik, itu sepertiga waktunya. Cache tetap
+                # dilewati karena Pod ini toh dibuang setiap menit.
+                - name: SKIP_OPTIMIZE
+                  value: "true"
+
+              resources:
+                requests: { cpu: "50m",  memory: "192Mi" }
+                limits:   { cpu: "500m", memory: "384Mi" }
+
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+
+              volumeMounts:
+                - name: storage-app
+                  mountPath: /var/www/html/storage/app/public
+                - name: storage-framework
+                  mountPath: /var/www/html/storage/framework
+                - name: bootstrap-cache
+                  mountPath: /var/www/html/bootstrap/cache
+                - name: tmp
+                  mountPath: /tmp
+
+          volumes:
+            - name: storage-app
+              persistentVolumeClaim:
+                claimName: laravel-storage
+            - name: storage-framework
+              emptyDir: {}
+            - name: bootstrap-cache
+              emptyDir: {}
+            - name: tmp
+              emptyDir: {}

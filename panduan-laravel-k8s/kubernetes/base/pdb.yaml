@@ -1,0 +1,45 @@
+# ============================================================================
+# PodDisruptionBudget
+#
+# PDB melindungi dari gangguan SUKARELA (voluntary disruption): drain node
+# saat upgrade, penskalaan klaster, atau eviction oleh administrator.
+# Ia TIDAK melindungi dari gangguan tak sukarela seperti Node yang mati
+# mendadak atau OOM kill -- tidak ada objek Kubernetes yang bisa.
+#
+# Kenapa penting justru di klaster kubeadm: saat Anda menjalankan
+# `kubectl drain 192.168.50.15` untuk upgrade, tanpa PDB semua Pod di Node
+# itu diusir sekaligus. Bila kebetulan seluruh replika ada di sana,
+# aplikasinya mati total selama beberapa detik.
+#
+# minAvailable: 1 menahan drain sampai ada Pod pengganti yang siap di Node
+# lain. Drain jadi lebih lambat -- dan itu memang tujuannya.
+# ============================================================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: laravel-fpm
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: laravel-fpm
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: laravel-nginx
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: laravel-nginx
+---
+# CATATAN untuk komponen ber-replika 1 (mariadb, redis, redis-cache):
+#
+# JANGAN memasang PDB minAvailable: 1 pada mereka. Dengan hanya satu replika,
+# PDB semacam itu membuat `kubectl drain` MENGGANTUNG SELAMANYA -- tidak akan
+# pernah ada Pod kedua yang memenuhi syarat.
+#
+# Untuk database satu replika, keputusannya memang harus manual: terima
+# downtime sesaat saat drain, atau naikkan ke topologi ber-replika dengan
+# operator terlebih dahulu.

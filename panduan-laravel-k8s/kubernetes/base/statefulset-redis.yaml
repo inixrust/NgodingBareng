@@ -1,0 +1,120 @@
+# ============================================================================
+# Redis #1 — ANTRIAN dan SESI (persisten)
+#
+# Kenapa ada DUA instance Redis di stack ini?
+#
+# Karena kebijakan eviction Redis bersifat PER-SERVER, bukan per-database.
+# Menyimpan cache dan antrian di server yang sama memaksa kita memilih satu
+# kebijakan untuk keduanya, dan kedua pilihan itu sama-sama buruk:
+#
+#   - allkeys-lru : saat memori penuh, Redis membuang key paling jarang
+#                   dipakai. Bagus untuk cache. Untuk antrian, artinya JOB
+#                   HILANG TANPA JEJAK -- dan sesi pengguna ikut terhapus.
+#   - noeviction  : penulisan ditolak dengan error saat memori penuh. Benar
+#                   untuk antrian (lebih baik gagal terlihat daripada hilang
+#                   diam-diam), tetapi membuat cache berhenti berfungsi.
+#
+# Memisahkannya membuat masing-masing memakai kebijakan yang tepat. Biayanya
+# hanya satu Pod kecil tambahan.
+#
+# Instance INI memakai noeviction + AOF (persistensi ke disk), karena job
+# yang sudah masuk antrian tidak boleh hilang saat Pod di-restart.
+# ============================================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: queue-broker
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/component: queue-broker
+    spec:
+      serviceAccountName: laravel
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999           # uid "redis" pada image resmi
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          imagePullPolicy: IfNotPresent
+
+          command: ["redis-server"]
+          args:
+            - --appendonly
+            - "yes"                     # AOF: setiap tulisan dicatat ke disk
+            - --appendfsync
+            - "everysec"                # kompromi standar daya tahan/kinerja
+            - --maxmemory
+            - "512mb"
+            - --maxmemory-policy
+            - "noeviction"              # lihat penjelasan di atas
+            - --save
+            - "900 1"                   # snapshot RDB sebagai jaring pengaman
+            - --dir
+            - /data
+
+          ports:
+            - name: redis
+              containerPort: 6379
+
+          startupProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 3
+            failureThreshold: 20
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "640Mi"     # maxmemory 512mb + ruang untuk AOF buffer
+            limits:
+              memory: "640Mi"     # QoS Guaranteed
+              cpu: "500m"
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: data
+              mountPath: /data
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

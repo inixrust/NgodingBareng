@@ -1,0 +1,82 @@
+# ============================================================================
+# Ingress
+#
+# Ingress hanyalah ATURAN. Yang benar-benar melayani trafik adalah Ingress
+# Controller. Membuat objek ini tanpa memasang controller menghasilkan objek
+# yang valid, kolom ADDRESS kosong selamanya, dan tidak ada pesan galat apa
+# pun -- kesalahan yang paling sering membuat orang kebingungan.
+#
+# Pemasangan controller dijelaskan di docs/08-ingress.md untuk kedua
+# environment.
+#
+# --- PORTABILITAS ----------------------------------------------------------
+# Yang berbeda antara Docker Desktop dan kubeadm hanya HOST-nya. Karena itu
+# host di sini diisi placeholder dan ditimpa overlay:
+#   overlays/docker-desktop -> laravel.localhost
+#   overlays/onprem         -> laravel.192.168.50.200.nip.io
+#
+# ingressClassName sengaja SAMA ("nginx") di kedua environment, karena
+# controller yang dipasang juga sama. Inilah yang membuat perbedaannya
+# tinggal satu baris.
+# ============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: laravel
+  labels:
+    app.kubernetes.io/name: laravel
+    app.kubernetes.io/component: ingress
+  annotations:
+    # --- ukuran unggahan ---------------------------------------------------
+    # Harus >= client_max_body_size di Nginx aplikasi dan post_max_size di
+    # php.ini. Bila Ingress lebih kecil, unggahan ditolak 413 sebelum sempat
+    # menyentuh aplikasi -- dan log aplikasi tidak menunjukkan apa pun.
+    nginx.ingress.kubernetes.io/proxy-body-size: "20m"
+
+    # --- timeout -----------------------------------------------------------
+    # Rantai timeout yang harus SELARAS, dari luar ke dalam:
+    #   Ingress proxy-read-timeout (60s)
+    #     >= Nginx aplikasi fastcgi_read_timeout (60s)
+    #        >= PHP max_execution_time (30s)
+    # Bila urutan ini terbalik, gejalanya adalah 504 tanpa jejak di log PHP,
+    # karena PHP masih bekerja saat proxy sudah menyerah.
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+
+    # --- header untuk Laravel ---------------------------------------------
+    # X-Forwarded-Proto diteruskan otomatis oleh controller; Laravel
+    # memakainya (lewat TRUSTED_PROXIES) untuk membangun URL https.
+    nginx.ingress.kubernetes.io/enable-real-ip: "true"
+
+    # --- keamanan ----------------------------------------------------------
+    # Aktifkan setelah TLS terpasang; sebelum itu, redirect ke https pada
+    # klaster tanpa sertifikat hanya menghasilkan halaman error.
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: laravel.local          # ditimpa overlay
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                # Ingress menunjuk Service Nginx, BUKAN Service PHP-FPM.
+                # Ingress berbicara HTTP; PHP-FPM berbicara FastCGI --
+                # keduanya tidak akan pernah saling mengerti.
+                name: laravel-web
+                port:
+                  name: http
+
+  # --- TLS ------------------------------------------------------------------
+  # Diaktifkan di overlay produksi. Dengan cert-manager, cukup tambahkan
+  # anotasi cert-manager.io/cluster-issuer dan blok tls berikut; sertifikat
+  # akan diterbitkan dan diperbarui otomatis.
+  #
+  # tls:
+  #   - hosts:
+  #       - laravel.example.com
+  #     secretName: laravel-tls

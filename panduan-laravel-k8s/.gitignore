@@ -1,0 +1,14 @@
+.env
+.env.local
+.env.*.local
+src/vendor/
+src/node_modules/
+src/public/build/
+src/public/hot
+src/storage/*.key
+src/storage/framework/cache/*
+src/storage/framework/sessions/*
+src/storage/framework/views/*
+src/storage/logs/*
+src/bootstrap/cache/*.php
+*.log

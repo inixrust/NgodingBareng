@@ -1,0 +1,118 @@
+# ============================================================================
+# Seluruh Service dikumpulkan dalam satu berkas karena masing-masing hanya
+# belasan baris dan selalu dibaca bersamaan. Bila Anda lebih suka satu berkas
+# per resource, pecah menjadi service-laravel.yaml, service-nginx.yaml, dst.,
+# lalu daftarkan semuanya di kustomization.yaml.
+#
+# CATATAN PORTABILITAS
+# Semua Service di sini bertipe ClusterIP -- termasuk yang di depan Nginx.
+# Ini disengaja dan merupakan kunci agar manifest sama persis di Docker
+# Desktop maupun kubeadm:
+#
+#   - NodePort mengikat port di setiap Node; nomornya harus dipilih manual
+#     dan berbeda per environment.
+#   - LoadBalancer butuh penyedia yang menyediakannya; di Docker Desktop
+#     berperilaku lain daripada di kubeadm+MetalLB.
+#
+# Yang berbeda antar-environment kita dorong ke SATU tempat: Ingress
+# Controller. Aplikasi ini sendiri tidak perlu tahu bedanya.
+# ============================================================================
+
+# --------------------------------------------------------------- Nginx (web)
+apiVersion: v1
+kind: Service
+metadata:
+  name: laravel-web
+  labels:
+    app.kubernetes.io/name: laravel-nginx
+    app.kubernetes.io/component: web
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: laravel-nginx
+  ports:
+    - name: http
+      port: 80              # port Service (yang dituju Ingress)
+      targetPort: http      # merujuk NAMA port di container, bukan angka.
+                            # Bila nanti Nginx pindah port, hanya Deployment
+                            # yang berubah -- Service tidak perlu disentuh.
+      protocol: TCP
+---
+# ---------------------------------------------------------- PHP-FPM (FastCGI)
+apiVersion: v1
+kind: Service
+metadata:
+  name: laravel-fpm
+  labels:
+    app.kubernetes.io/name: laravel-fpm
+    app.kubernetes.io/component: app
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: laravel-fpm
+  ports:
+    - name: fastcgi
+      port: 9000
+      targetPort: fastcgi
+      protocol: TCP
+---
+# ------------------------------------------------------- MariaDB (headless)
+# clusterIP: None membuat Service ini HEADLESS: DNS mengembalikan IP Pod
+# secara langsung, bukan satu IP virtual.
+#
+# Untuk StatefulSet, inilah yang benar:
+#   - memberi nama DNS stabil per Pod: mariadb-0.mariadb.laravel.svc...
+#   - menghilangkan satu lapis NAT kube-proxy pada koneksi database
+#   - saat nanti ditambah replika, klien bisa menyapa replika tertentu
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb
+  labels:
+    app.kubernetes.io/name: mariadb
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: mariadb
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+      protocol: TCP
+---
+# ------------------------------------------------- Redis (antrian & sesi)
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: queue-broker
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+      protocol: TCP
+---
+# ------------------------------------------------------------- Redis (cache)
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-cache
+  labels:
+    app.kubernetes.io/name: redis-cache
+    app.kubernetes.io/component: cache
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: redis-cache
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+      protocol: TCP

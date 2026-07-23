@@ -1,0 +1,121 @@
+# Menurunkan permintaan sumber daya agar seluruh stack muat di Docker
+# Desktop. Nilai produksi tetap ada di base dan tidak tersentuh.
+#
+# Total requests setelah patch ini: ~1.1 CPU dan ~1.4 Gi -- masih nyaman di
+# laptop dengan alokasi Docker Desktop 4 CPU / 6 GB.
+#
+# Ini strategic merge patch: hanya field yang disebutkan yang berubah,
+# sisanya diwarisi dari base.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mariadb
+spec:
+  template:
+    spec:
+      containers:
+        - name: mariadb
+          args:
+            - --character-set-server=utf8mb4
+            - --collation-server=utf8mb4_unicode_ci
+            # 1G buffer pool tidak muat di limit 512Mi. Nilai harus
+            # diturunkan bersama-sama, kalau tidak MariaDB gagal start
+            # dengan galat alokasi memori.
+            - --innodb-buffer-pool-size=128M
+            - --innodb-flush-log-at-trx-commit=2
+            - --max-connections=50
+            - --skip-name-resolve
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+spec:
+  template:
+    spec:
+      containers:
+        - name: redis
+          args:
+            - --appendonly
+            - "yes"
+            - --appendfsync
+            - "everysec"
+            - --maxmemory
+            - "128mb"
+            - --maxmemory-policy
+            - "noeviction"
+            - --save
+            - "900 1"
+            - --dir
+            - /data
+          resources:
+            requests: { cpu: "50m", memory: "192Mi" }
+            limits:   { cpu: "250m", memory: "192Mi" }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-cache
+spec:
+  template:
+    spec:
+      containers:
+        - name: redis
+          args:
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --maxmemory
+            - "64mb"
+            - --maxmemory-policy
+            - "allkeys-lru"
+          resources:
+            requests: { cpu: "25m", memory: "96Mi" }
+            limits:   { cpu: "250m", memory: "96Mi" }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: laravel-fpm
+spec:
+  template:
+    spec:
+      containers:
+        - name: php-fpm
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "1000m", memory: "384Mi" }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: laravel-nginx
+spec:
+  template:
+    spec:
+      containers:
+        - name: nginx
+          resources:
+            requests: { cpu: "25m", memory: "48Mi" }
+            limits:   { cpu: "250m", memory: "96Mi" }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: laravel-queue
+spec:
+  template:
+    spec:
+      containers:
+        - name: queue
+          resources:
+            requests: { cpu: "50m", memory: "192Mi" }
+            limits:   { cpu: "500m", memory: "384Mi" }

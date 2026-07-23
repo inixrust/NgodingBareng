@@ -1,0 +1,158 @@
+# ============================================================================
+# Nginx
+#
+# Deployment TERPISAH dari PHP-FPM, sesuai prinsip pemisahan concern:
+#   - Nginx menangani koneksi, TLS-terminated traffic, dan berkas statis.
+#   - PHP-FPM menangani eksekusi kode.
+# Keduanya bisa diskalakan sendiri-sendiri: situs dengan banyak aset statis
+# butuh lebih banyak Nginx; situs dengan proses berat butuh lebih banyak FPM.
+#
+# --- KONSEKUENSI YANG HARUS DISADARI --------------------------------------
+# Karena terpisah Pod, Nginx tidak berbagi filesystem dengan PHP-FPM. Dua
+# akibatnya sudah ditangani di sini:
+#
+#   1. Berkas statis (public/) DIBAKAR ke dalam image Nginx pada stage
+#      terpisah di Dockerfile yang sama. Keduanya dibangun dari commit yang
+#      sama dan di-tag sama, jadi tidak pernah saling ketinggalan versi.
+#   2. Berkas UNGGAHAN pengguna tidak ada di image mana pun. Karena itu PVC
+#      ReadWriteMany yang sama juga dipasang di sini (read-only) supaya
+#      /storage/... bisa dilayani langsung tanpa melewati PHP.
+#
+# Bila Anda lebih suka pola sidecar (Nginx dan PHP-FPM dalam satu Pod),
+# lihat docs/05-manifest-kubernetes.md bagian "Alternatif: pola sidecar"
+# beserta patch Kustomize-nya yang sudah disiapkan.
+# ============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: laravel-nginx
+  labels:
+    app.kubernetes.io/name: laravel-nginx
+    app.kubernetes.io/component: web
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: laravel-nginx
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: laravel-nginx
+        app.kubernetes.io/component: web
+    spec:
+      serviceAccountName: laravel
+      automountServiceAccountToken: false
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101            # uid nginx pada image nginx-unprivileged
+        runAsGroup: 101
+        fsGroup: 101
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: laravel-nginx
+
+      containers:
+        - name: nginx
+          image: laravel-app/nginx:latest
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8080
+
+          # --- PROBE ---------------------------------------------------------
+          # Perhatikan pembagian tugasnya, ini keputusan desain yang penting:
+          #
+          #   liveness  -> /healthz : dijawab Nginx sendiri, TIDAK menyentuh
+          #                PHP. Yang diuji adalah "apakah proses Nginx ini
+          #                masih waras". Kalau liveness ikut menguji PHP,
+          #                matinya PHP akan ikut membunuh seluruh Pod Nginx --
+          #                kegagalan berantai yang tidak perlu.
+          #
+          #   readiness -> /up     : melewati FastCGI ke PHP-FPM. Yang diuji
+          #                adalah "apakah Pod ini bisa melayani request
+          #                sungguhan". Bila PHP-FPM belum siap, Pod Nginx ini
+          #                dicabut dari Service -- tanpa dibunuh.
+          #
+          # /up adalah rute kesehatan bawaan Laravel 11+. Untuk pemeriksaan
+          # yang juga menguji koneksi database dan Redis, lihat
+          # docs/13-health-check.md (rute /health/ready) dan patch-nya.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 15
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /up
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          lifecycle:
+            preStop:
+              exec:
+                # Jeda + shutdown rapi. Nginx menyelesaikan request yang
+                # sedang berjalan sebelum benar-benar berhenti.
+                command: ["sh", "-c", "sleep 5 && nginx -s quit"]
+
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              memory: "128Mi"
+              cpu: "500m"
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              # Tidak perlu NET_BIND_SERVICE karena Nginx mendengarkan di
+              # port 8080 (>1024). Itulah gunanya image nginx-unprivileged.
+
+          volumeMounts:
+            # Nginx menulis berkas sementara dan pid ke /tmp (lihat nginx.conf).
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /var/cache/nginx
+            # Berkas unggahan, read-only. Nginx hanya perlu MEMBACA.
+            - name: storage-app
+              mountPath: /var/www/html/storage/app/public
+              readOnly: true
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+        - name: storage-app
+          persistentVolumeClaim:
+            claimName: laravel-storage
+            readOnly: true

@@ -1,0 +1,207 @@
+# ============================================================================
+# NetworkPolicy
+#
+# Secara default, SEMUA Pod di klaster bisa menghubungi SEMUA Pod lain. Itu
+# berarti satu container yang berhasil ditembus bisa langsung memindai dan
+# menyerang database di namespace mana pun.
+#
+# Berkas ini menutup itu dengan pola default-deny + izin eksplisit.
+#
+# --- CARA KERJANYA YANG SERING DISALAHPAHAMI -------------------------------
+# NetworkPolicy bersifat ADITIF dan hanya berlaku pada Pod yang DISELEKSI.
+# Begitu SATU policy menyeleksi sebuah Pod untuk arah tertentu (Ingress atau
+# Egress), Pod itu menjadi default-deny untuk arah tersebut, dan hanya lalu
+# lintas yang diizinkan policy mana pun yang boleh lewat.
+#
+# --- PERINGATAN UNTUK DOCKER DESKTOP ---------------------------------------
+# NetworkPolicy hanya DITEGAKKAN bila CNI-nya mendukung (Calico, Cilium).
+# CNI bawaan Docker Desktop TIDAK menegakkannya: objeknya tersimpan rapi,
+# `kubectl get netpol` menampilkannya, tetapi lalu lintasnya tetap lewat.
+#
+# Ini sudah diuji langsung: sebuah Pod tanpa label yang diizinkan tetap
+# berhasil membuka koneksi ke mariadb:3306 di Docker Desktop.
+#
+# Konsekuensinya: JANGAN pernah memvalidasi kebijakan jaringan di Docker
+# Desktop lalu menganggapnya terbukti. Uji di klaster kubeadm yang memakai
+# Calico/Cilium. Cara mengujinya ada di docs/15-security.md.
+# ============================================================================
+
+# ---------------------------------------------------------- 1. DEFAULT DENY
+# podSelector kosong = seleksi SEMUA Pod di namespace ini.
+# Tidak ada blok ingress/egress = tidak ada yang diizinkan.
+# Semua policy berikutnya adalah pengecualian atas aturan ini.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# ------------------------------------------------------------------- 2. DNS
+# Nyaris semua yang lain akan gagal tanpa ini. Pod harus bisa menghubungi
+# CoreDNS untuk me-resolve nama Service seperti "mariadb" atau "redis".
+#
+# Ini penyebab nomor satu "NetworkPolicy saya membuat semuanya rusak":
+# default-deny egress dipasang, lupa mengizinkan DNS, lalu semua koneksi
+# gagal dengan galat resolusi nama yang terlihat seperti masalah lain.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# ------------------------------------------- 3. Ingress Controller -> Nginx
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-nginx
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: laravel-nginx
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Label ini dipasang otomatis oleh Kubernetes pada setiap namespace
+        # sejak v1.21, jadi bisa diandalkan tanpa memberi label manual.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# ------------------------------------------------- 4. Nginx -> PHP-FPM
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-nginx-to-fpm
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: laravel-fpm
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: laravel-nginx
+      ports:
+        - protocol: TCP
+          port: 9000
+---
+# ---------------------------------------- 5. Egress Nginx -> PHP-FPM
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-nginx-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: laravel-nginx
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: laravel-fpm
+      ports:
+        - protocol: TCP
+          port: 9000
+---
+# ------------------------ 6. Aplikasi & worker -> MariaDB, Redis
+# Satu policy untuk php-fpm, queue worker, scheduler, dan job migrasi.
+# matchExpressions dipakai agar tidak perlu menulis empat policy hampir sama.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app-to-data
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - laravel-fpm
+          - laravel-queue
+          - laravel-scheduler
+          - db-migrate
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mariadb
+      ports:
+        - protocol: TCP
+          port: 3306
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis-cache
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+# ------------------------------------ 7. Sisi masuk MariaDB dan Redis
+# Menutup dari arah sebaliknya. Dua arah sengaja ditulis keduanya: kalau
+# suatu saat policy egress di atas terhapus, database TETAP tidak bisa
+# dijangkau Pod sembarangan.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-data-ingress
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [mariadb, redis, redis-cache]
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - laravel-fpm
+                  - laravel-queue
+                  - laravel-scheduler
+                  - db-migrate
+      ports:
+        - protocol: TCP
+          port: 3306
+        - protocol: TCP
+          port: 6379

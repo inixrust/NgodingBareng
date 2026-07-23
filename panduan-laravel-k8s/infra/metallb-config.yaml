@@ -1,0 +1,151 @@
+# ============================================================================
+# MetalLB — konfigurasi untuk jaringan 192.168.50.0/24
+#
+# Terapkan SETELAH controller MetalLB Running:
+#   kubectl apply -f infra/metallb-config.yaml
+#
+# --- KENAPA MetalLB DIBUTUHKAN ---------------------------------------------
+# Service bertipe LoadBalancer meminta alamat IP eksternal kepada penyedia
+# cloud. Di klaster on-premise tidak ada penyedia cloud, jadi permintaan itu
+# tidak pernah dijawab: Service akan menampilkan EXTERNAL-IP <pending>
+# selamanya.
+#
+# MetalLB mengisi peran itu. Dalam mode Layer 2, satu Node "mengaku" sebagai
+# pemilik IP tersebut lewat balasan ARP, sehingga router dan komputer lain di
+# LAN mengirim paket ke Node itu, yang lalu meneruskannya ke Pod.
+#
+# --- MODE L2 vs BGP --------------------------------------------------------
+#   Layer 2 (dipakai di sini)
+#     + Tidak perlu konfigurasi apa pun di router. Langsung jalan.
+#     - Semua trafik untuk satu IP masuk lewat SATU Node (bukan load
+#       balancing sejati; Node lain hanya cadangan).
+#     - Failover butuh beberapa detik (menunggu ARP diperbarui).
+#   BGP
+#     + Trafik benar-benar terbagi ke banyak Node.
+#     - Router harus mendukung dan dikonfigurasi BGP.
+#
+# Untuk klaster empat Node seperti ini, L2 adalah pilihan yang tepat.
+# ============================================================================
+
+# --------------------------------------------------------------- KOLAM ALAMAT
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: kolam-lan
+  namespace: metallb-system
+spec:
+  addresses:
+    # ========================================================================
+    # PEMILIHAN RENTANG — BAGIAN PALING KRITIS DARI SELURUH BERKAS INI
+    #
+    # Alamat yang dipakai node klaster:
+    #     192.168.50.14   control plane
+    #     192.168.50.15   worker 1
+    #     192.168.50.16   worker 2
+    #     192.168.50.17   worker 3
+    #
+    # Rentang di bawah dimulai dari .200 sehingga:
+    #   - Tidak menyentuh .14-.17 (IP node). Bentrok di sini membuat Node
+    #     hilang dari jaringan -- kegagalan yang sangat sulit didiagnosis
+    #     karena gejalanya muncul di tempat lain.
+    #   - Menyisakan .1-.199 untuk gateway, server lain, dan perangkat statis.
+    #
+    # WAJIB DIPERIKSA SEBELUM MENERAPKAN:
+    #
+    #   1. Rentang ini HARUS DIKELUARKAN dari kolam DHCP router Anda.
+    #      Bila tidak, suatu hari router akan memberikan 192.168.50.205 ke
+    #      laptop seseorang, dan dua perangkat akan memperebutkan IP yang
+    #      sama. Gejalanya: layanan kadang bisa diakses, kadang tidak.
+    #
+    #   2. Pastikan tidak ada yang memakainya sekarang:
+    #        nmap -sn 192.168.50.200-240
+    #      atau, dari salah satu node:
+    #        for i in $(seq 200 240); do
+    #          ping -c1 -W1 192.168.50.$i >/dev/null 2>&1 && echo "TERPAKAI: .$i"
+    #        done
+    #
+    #   3. Semua node harus berada di L2 broadcast domain yang sama dengan
+    #      rentang ini. MetalLB mode L2 bekerja lewat ARP, dan ARP tidak
+    #      melewati router.
+    # ========================================================================
+    - 192.168.50.200-192.168.50.240
+
+  # false = jangan alokasikan alamat .200 (network) dan .240 sebagai batas.
+  # Menyisakan alamat tepi mengurangi risiko bentrok dengan perangkat yang
+  # memakai konvensi alamat khusus.
+  avoidBuggyIPs: true
+
+  # true (default) = MetalLB boleh memberi IP dari kolam ini ke Service
+  # LoadBalancer mana pun. Setel false bila ingin setiap Service menyebut
+  # kolamnya secara eksplisit lewat anotasi.
+  autoAssign: true
+---
+# ------------------------------------------------------------ PENGUMUMAN L2
+# L2Advertisement memberi tahu MetalLB untuk mengumumkan kolam ini lewat ARP.
+# Tanpa objek ini, IP dialokasikan tetapi TIDAK ADA yang mengumumkannya, dan
+# Service tetap tidak bisa dijangkau dari LAN. Ini kesalahan yang sangat
+# sering terjadi karena Service-nya sudah terlihat punya EXTERNAL-IP.
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: umumkan-lan
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - kolam-lan
+
+  # Batasi Node yang boleh mengumumkan alamat ini. Di sini hanya worker,
+  # supaya trafik dari luar tidak pernah melewati control plane.
+  #
+  # Hapus blok ini bila Anda ingin control plane ikut menjadi kandidat.
+  nodeSelectors:
+    - matchLabels:
+        node-role.kubernetes.io/worker: ""
+  # Beri label pada worker terlebih dahulu:
+  #   kubectl label node <nama-worker> node-role.kubernetes.io/worker=""
+---
+# ============================================================================
+# Service LoadBalancer untuk Ingress Controller
+#
+# Inilah satu-satunya Service LoadBalancer di seluruh stack. Semua trafik dari
+# luar masuk lewat sini, lalu Ingress yang merutekannya ke Service aplikasi.
+#
+# Alamat dipilih EKSPLISIT (bukan dibiarkan otomatis) supaya DNS dan berkas
+# hosts tidak perlu diubah setiap kali Service dibuat ulang.
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-nginx-controller
+  namespace: ingress-nginx
+  annotations:
+    metallb.io/address-pool: kolam-lan
+spec:
+  type: LoadBalancer
+  # IP tetap. Nilai ini yang dipakai di host Ingress overlay onprem
+  # (laravel.192.168.50.200.nip.io).
+  loadBalancerIP: 192.168.50.200
+
+  # Local = pertahankan IP sumber asli pengunjung.
+  #
+  # Dengan Cluster (default), kube-proxy boleh meneruskan paket ke Node lain
+  # dan melakukan SNAT -- akibatnya SEMUA pengunjung terlihat berasal dari IP
+  # Node. Rate limiting, geolokasi, dan log audit menjadi tidak berguna.
+  #
+  # Harga dari Local: trafik hanya dilayani Node yang punya Pod controller.
+  # Karena itu Ingress Controller sebaiknya di-deploy sebagai DaemonSet, atau
+  # minimal punya replika di setiap worker.
+  externalTrafficPolicy: Local
+
+  selector:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/component: controller
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP

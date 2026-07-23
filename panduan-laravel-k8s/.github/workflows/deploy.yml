@@ -1,0 +1,271 @@
+# ============================================================================
+# Pipeline CI/CD: build -> push -> deploy
+#
+# Prinsip yang dipegang:
+#   1. Satu commit = satu tag image yang unik dan permanen. Tidak pernah
+#      "latest" di produksi -- tanpa tag unik, tidak ada yang bisa disebut
+#      "versi sebelumnya" saat rollback.
+#   2. Image yang di-deploy adalah image yang DIUJI. Tidak ada rebuild
+#      di antara pengujian dan deploy.
+#   3. Pipeline GAGAL bila rollout gagal. Deploy yang "berhasil" tetapi
+#      Pod-nya CrashLoopBackOff adalah deploy yang gagal.
+# ============================================================================
+name: Build dan Deploy
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment tujuan
+        required: true
+        default: staging
+        type: choice
+        options: [staging, production]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PHP: ${{ github.repository }}/laravel-php
+  IMAGE_NGINX: ${{ github.repository }}/laravel-nginx
+
+# Batalkan run lama pada branch yang sama. Tanpa ini, tiga push beruntun
+# menghasilkan tiga deploy yang saling mendahului dan urutannya tak tentu.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ==========================================================================
+  # 1. UJI — dijalankan lebih dulu; tidak ada image yang dibangun bila gagal.
+  # ==========================================================================
+  uji:
+    name: Uji
+    runs-on: ubuntu-latest
+    services:
+      # Layanan pendamping untuk pengujian. Ini bukan produksi, jadi
+      # konfigurasinya sengaja sesederhana mungkin.
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: laravel_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+      redis:
+        image: redis:7.4-alpine
+        ports: ['6379:6379']
+        options: --health-cmd="redis-cli ping" --health-interval=10s --health-retries=5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Siapkan PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: bcmath, gd, intl, pcntl, pdo_mysql, redis, zip
+          coverage: none
+
+      # Cache vendor dipisahkan berdasarkan hash composer.lock. Kunci yang
+      # memakai hash berkas (bukan nomor run) berarti cache dipakai ulang
+      # selama dependensinya tidak berubah.
+      - name: Cache dependensi Composer
+        uses: actions/cache@v4
+        with:
+          path: src/vendor
+          key: composer-${{ hashFiles('src/composer.lock') }}
+          restore-keys: composer-
+
+      - name: Pasang dependensi
+        working-directory: src
+        # --prefer-dist dan --no-progress mempercepat; devDependencies TETAP
+        # dipasang di sini karena pengujian membutuhkannya.
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Siapkan environment pengujian
+        working-directory: src
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+          sed -i 's/^DB_HOST=.*/DB_HOST=127.0.0.1/' .env
+          sed -i 's/^DB_DATABASE=.*/DB_DATABASE=laravel_test/' .env
+          sed -i 's/^DB_USERNAME=.*/DB_USERNAME=root/' .env
+          sed -i 's/^DB_PASSWORD=.*/DB_PASSWORD=root/' .env
+          sed -i 's/^REDIS_HOST=.*/REDIS_HOST=127.0.0.1/' .env
+
+      - name: Migrasi database uji
+        working-directory: src
+        run: php artisan migrate --force
+
+      - name: Jalankan pengujian
+        working-directory: src
+        run: php artisan test
+
+  # ==========================================================================
+  # 2. BUILD — dua image dari Dockerfile yang sama, di-push ke GHCR.
+  # ==========================================================================
+  build:
+    name: Build image
+    needs: uji
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write        # dibutuhkan untuk push ke ghcr.io
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Buildx dibutuhkan untuk cache registry dan build multi-arsitektur.
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login ke registry
+        # Pada pull request, jangan login dan jangan push: PR dari fork tidak
+        # punya (dan tidak boleh punya) kredensial registry.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tentukan tag
+        id: meta
+        run: |
+          # SHA commit dipakai sebagai tag: unik, permanen, dan bisa
+          # ditelusuri kembali ke baris kode persisnya.
+          TAG="sha-$(git rev-parse --short HEAD)"
+          # Tag git (v1.2.3) diutamakan bila ada.
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG="${{ github.ref_name }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Tag image: $TAG"
+
+      - name: Build dan push image PHP-FPM
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/php/Dockerfile
+          target: php
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_PHP }}:${{ steps.meta.outputs.tag }}
+          # Cache lintas run disimpan di registry. Tanpa ini, setiap build
+          # mengunduh dan mengompilasi ulang seluruh ekstensi PHP (~3 menit).
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PHP }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PHP }}:buildcache,mode=max
+          provenance: false
+
+      - name: Build dan push image Nginx
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/php/Dockerfile
+          target: nginx
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NGINX }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NGINX }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NGINX }}:buildcache,mode=max
+          provenance: false
+
+      # Pindai kerentanan SEBELUM deploy. exit-code: 1 membuat pipeline
+      # berhenti bila ditemukan kerentanan CRITICAL.
+      - name: Pindai kerentanan image
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_PHP }}:${{ steps.meta.outputs.tag }}
+          format: table
+          severity: CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true      # jangan gagal karena CVE yang belum ada perbaikannya
+
+  # ==========================================================================
+  # 3. DEPLOY — hanya dari branch main atau tag, tidak pernah dari PR.
+  # ==========================================================================
+  deploy:
+    name: Deploy ke Kubernetes
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # Environment GitHub memungkinkan approval manual dan menyimpan secret
+    # terpisah per environment.
+    environment: ${{ inputs.environment || 'production' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Siapkan kubectl dan kustomize
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.35.0    # samakan dengan versi klaster; selisih lebih
+                              # dari satu minor tidak dijamin kompatibel
+
+      - name: Siapkan kubeconfig
+        # KUBE_CONFIG adalah isi kubeconfig yang di-encode base64:
+        #   cat ~/.kube/config | base64 -w0
+        #
+        # Gunakan kubeconfig milik ServiceAccount khusus deploy dengan hak
+        # terbatas -- BUKAN admin.conf klaster. Cara membuatnya ada di
+        # docs/17-cicd.md.
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          kubectl config current-context
+
+      - name: Tetapkan tag image
+        working-directory: kubernetes/overlays/onprem
+        run: |
+          kustomize edit set image \
+            laravel-app/php=${{ env.REGISTRY }}/${{ env.IMAGE_PHP }}:${{ needs.build.outputs.tag }}
+          kustomize edit set image \
+            laravel-app/nginx=${{ env.REGISTRY }}/${{ env.IMAGE_NGINX }}:${{ needs.build.outputs.tag }}
+
+      - name: Pratinjau perubahan
+        # diff menampilkan persis apa yang akan berubah di klaster.
+        # `|| true` diperlukan karena kubectl diff keluar dengan kode 1
+        # ketika MEMANG ada perbedaan -- itu keadaan normal, bukan galat.
+        run: kubectl diff -k kubernetes/overlays/onprem || true
+
+      - name: Jalankan migrasi
+        run: |
+          # Job bersifat immutable, jadi hapus dulu yang lama.
+          kubectl -n laravel delete job db-migrate --ignore-not-found
+          kubectl apply -k kubernetes/overlays/onprem
+          kubectl -n laravel wait --for=condition=complete job/db-migrate --timeout=600s
+
+      - name: Tunggu rollout
+        # Inilah gerbang sesungguhnya. rollout status keluar dengan kode 0
+        # HANYA bila Pod baru benar-benar Ready. Tanpa langkah ini, pipeline
+        # akan berwarna hijau meski aplikasinya CrashLoopBackOff.
+        run: |
+          kubectl -n laravel rollout status deployment/laravel-fpm   --timeout=600s
+          kubectl -n laravel rollout status deployment/laravel-nginx --timeout=600s
+          kubectl -n laravel rollout status deployment/laravel-queue --timeout=600s
+
+      - name: Rollback otomatis bila gagal
+        if: failure()
+        run: |
+          echo "Rollout gagal — mengembalikan ke revisi sebelumnya"
+          kubectl -n laravel rollout undo deployment/laravel-fpm   || true
+          kubectl -n laravel rollout undo deployment/laravel-nginx || true
+          kubectl -n laravel rollout undo deployment/laravel-queue || true
+          kubectl -n laravel get pods
+          kubectl -n laravel describe pods -l app.kubernetes.io/part-of=laravel-stack | tail -60
+
+      - name: Verifikasi setelah deploy
+        run: |
+          kubectl -n laravel get pods,svc,ingress
+          # Uji HTTP dari dalam klaster: membuktikan seluruh rantai
+          # Nginx -> PHP-FPM -> database benar-benar hidup.
+          kubectl -n laravel run smoke-$RANDOM --rm -i --restart=Never \
+            --image=curlimages/curl:8.11.1 --command -- \
+            curl -fsS -o /dev/null -w '%{http_code}\n' http://laravel-web/up

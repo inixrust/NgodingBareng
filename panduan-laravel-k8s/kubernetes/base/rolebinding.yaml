@@ -1,0 +1,23 @@
+# RoleBinding menautkan Role ke subjek. Tanpa binding, Role hanyalah daftar
+# izin yang tidak berlaku untuk siapa pun.
+#
+# Verifikasi setelah apply:
+#   kubectl auth can-i list pods -n laravel \
+#     --as=system:serviceaccount:laravel:laravel-ops      -> yes
+#   kubectl auth can-i get secrets -n laravel \
+#     --as=system:serviceaccount:laravel:laravel-ops      -> no
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: laravel-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: laravel-readonly
+subjects:
+  - kind: ServiceAccount
+    name: laravel-ops
+    namespace: laravel
+# Catatan: ServiceAccount "laravel" (yang dipakai Pod aplikasi) sengaja TIDAK
+# ditautkan ke Role apa pun. Ia benar-benar tanpa izin -- dan memang tidak
+# membutuhkannya.
